@@ -1,3 +1,14 @@
+---
+title: Agentic Medical Image Analyzer
+emoji: 🏥
+colorFrom: blue
+colorTo: red
+sdk: streamlit
+app_file: streamlit_app.py
+pinned: false
+license: mit
+---
+
 # 🏥 Agentic Medical Image Analyzer
 
 An end-to-end autonomous AI system designed to analyze medical imagery (MRI, X-ray, CT) using **Vision-Language Foundation Models** and **Agentic Reasoning**. This project demonstrates how to bridge Computer Vision and LLMs using a stateful, memory-aware architecture.
