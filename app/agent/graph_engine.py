@@ -46,14 +46,13 @@ class MedicalAgentState(TypedDict):
 class MedicalGraphEngine:
     
     def __init__(self):
-        # Vision LLM for looking at the scans (Triage & Specialist)
-        # Using the new Llama 4 Scout model
+        # Vision LLM for looking at the scans (Using the new Llama 4 Scout model)
         self.vision_llm = ChatGroq(
             api_key=os.environ.get("GROQ_API_KEY"),
             model_name="meta-llama/llama-4-scout-17b-16e-instruct", 
             temperature=0.0
         )
-        # Text LLM for answering follow-up questions quickly (QA)
+        # Text LLM for answering follow-up questions quickly
         self.text_llm = ChatGroq(
             api_key=os.environ.get("GROQ_API_KEY"),
             model_name="llama-3.3-70b-versatile",
@@ -66,12 +65,10 @@ class MedicalGraphEngine:
     def _build_graph(self):
         workflow = StateGraph(MedicalAgentState)
         
-        # Define the three distinct agents
         workflow.add_node("triage_node", self._triage_node)
         workflow.add_node("specialist_node", self._specialist_node)
         workflow.add_node("qa_node", self._qa_node)
         
-        # Routing logic
         workflow.add_conditional_edges(START, self._router)
         workflow.add_edge("triage_node", "specialist_node")
         workflow.add_edge("specialist_node", "qa_node")
@@ -80,7 +77,6 @@ class MedicalGraphEngine:
         return workflow.compile(checkpointer=self.memory)
     
     def _router(self, state: MedicalAgentState) -> str:
-        # If an analysis is already complete, route directly to QA for follow-ups
         if state["clinical_metadata"].get("analysis_complete", False):
             return "qa_node"
         return "triage_node"
@@ -106,19 +102,20 @@ class MedicalGraphEngine:
         return {"clinical_metadata": metadata}
 
     def _specialist_node(self, state: MedicalAgentState) -> dict:
-        """Analyzes the image using the specific checklist for the detected modality."""
+        """Analyzes the image using a highly critical Chain-of-Sight technique."""
         modality = state["clinical_metadata"].get("modality", "Unknown")
         focus_areas = DISEASE_CHECKLISTS.get(modality, DISEASE_CHECKLISTS["Unknown"])
         
         system_prompt = (
-            f"You are an expert radiologist specializing in {modality}. "
-            f"{focus_areas}\n"
-            "Provide a structured clinical report detailing your findings based ONLY on this checklist. "
-            "State clearly if a condition appears to be present or absent. "
+            f"You are a highly vigilant, expert trauma radiologist specializing in {modality}. "
+            f"CRITICAL INSTRUCTION: Do NOT assume this image is normal. You must actively search for trauma. "
+            f"1. Trace the cortical outlines of every visible bone or structure from end to end.\n"
+            f"2. Look specifically for discontinuities, sharp steps, angulations, or displaced fragments indicating a fracture or anomaly.\n"
+            f"3. {focus_areas}\n\n"
+            "Provide a structured clinical report. If you see a fracture, describe exactly which bone and where it is located (e.g., mid-shaft, distal). "
             "ALWAYS remind the user that this is an AI educational tool and NOT a substitute for professional medical advice."
         )
         
-        # Find the original image message to analyze
         image_message = next((msg for msg in state["messages"] if isinstance(msg.content, list)), state["messages"][0])
         
         response = self.vision_llm.invoke([
@@ -126,7 +123,6 @@ class MedicalGraphEngine:
             image_message
         ])
         
-        # Save the report to metadata so QA node can reference it
         metadata = state["clinical_metadata"]
         metadata["diagnostic_summary"] = response.content
         metadata["analysis_complete"] = True
@@ -137,7 +133,7 @@ class MedicalGraphEngine:
         }
 
     def _qa_node(self, state: MedicalAgentState) -> dict:
-        """Answers follow-up questions using the saved memory."""
+        """Answers follow-up questions using the saved memory without generating new reports."""
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage):
             return {}
@@ -146,9 +142,12 @@ class MedicalGraphEngine:
         modality = state["clinical_metadata"].get("modality", "medical scan")
         
         system_prompt = (
-            f"You are a helpful medical AI assistant. Answer the patient's follow up questions. "
-            f"Base your answers strictly on this initial radiologist report for a {modality}:\n{history}\n"
-            "Do not hallucinate features not mentioned in the report."
+            f"You are a clinical advisory chatbot. You are having a conversational chat with a user about a {modality}. "
+            f"Here is the official radiologist report that was already generated:\n"
+            f"----------------------\n{history}\n----------------------\n"
+            f"YOUR TASK: Answer the user's questions based ONLY on the report above. "
+            f"DO NOT generate a new radiologist report. Speak conversationally. "
+            f"If the user asks for next steps, suggest standard clinical follow-ups (e.g., casting, surgery consult, pain management) based purely on what the report found."
         )
         
         response = self.text_llm.invoke([
