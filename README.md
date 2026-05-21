@@ -3,15 +3,14 @@ title: Agentic Medical Image Analyzer
 emoji: 🏥
 colorFrom: blue
 colorTo: red
-sdk: streamlit
-sdk_version: 1.35.0
+sdk: docker
 app_file: streamlit_app.py
 pinned: false
 license: mit
 ---
 # 🏥 Agentic Medical Image Analyzer
 
-An end-to-end autonomous AI system designed to analyze medical imagery (MRI, X-ray, CT) using **Vision-Language Foundation Models** and **Agentic Reasoning**. This project demonstrates how to bridge Computer Vision and LLMs using a stateful, memory-aware architecture.
+An end-to-end autonomous AI system designed to analyze medical imagery (MRI, X-ray, CT) using **Vision-Language Foundation Models** and **Agentic Reasoning**. This project demonstrates how to bridge cutting-edge vision models with agentic reasoning frameworks to deliver professional-grade medical insights.
 
 ---
 
@@ -59,14 +58,16 @@ The system follows a modular "Engine & Shell" design:
 
 ```bash
 # Clone the repository
-git clone [https://github.com/YOUR_USERNAME/agentic-medical-analyzer.git](https://github.com/YOUR_USERNAME/agentic-medical-analyzer.git)
+git clone https://github.com/YOUR_USERNAME/agentic-medical-analyzer.git
 cd agentic-medical-analyzer
 
 # Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows use: venv\Scripts\activate
 ```
+
 ### 3. Environment Setup
+
 * Create a .env file in the root directory:
 * GROQ_API_KEY=your_groq_key_here
 * LANGCHAIN_TRACING_V2=true
@@ -74,9 +75,11 @@ source venv/bin/activate  # On Windows use: venv\Scripts\activate
 * LANGCHAIN_PROJECT="Medical-AI-Agent"
 
 ### 4. Run the Application
-```bash
-streamlit run streamlit_app.py
 
+```bash
 # Install dependencies
+pip install -r requirements.txt
+
+# Run Streamlit app
+streamlit run streamlit_app.py
 ```
-* pip install -r requirements.txt
