@@ -10,3 +10,5 @@ python-dotenv
 langgraph
 streamlit
 transformers
+langchain-community
+typing-extensions
