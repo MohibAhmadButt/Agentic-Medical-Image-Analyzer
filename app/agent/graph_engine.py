@@ -1,6 +1,7 @@
 """
 LangGraph Multi-Agent Triage Engine with Memory
 Routes images from a Triage Agent to a Specialist Agent using Dynamic Chain-of-Sight.
+Includes Payload Cleaning to protect Text LLMs from Base64 Image panics.
 """
 
 import os
@@ -74,13 +75,13 @@ class MedicalAgentState(TypedDict):
 class MedicalGraphEngine:
     
     def __init__(self):
-        # Vision LLM for looking at the scans (Using the new Llama 4 Scout model)
+        # Vision LLM for Triage and Specialist
         self.vision_llm = ChatGroq(
             api_key=os.environ.get("GROQ_API_KEY"),
             model_name="meta-llama/llama-4-scout-17b-16e-instruct", 
             temperature=0.0
         )
-        # Text LLM for answering follow-up questions quickly
+        # Text LLM for QA Chatbot
         self.text_llm = ChatGroq(
             api_key=os.environ.get("GROQ_API_KEY"),
             model_name="llama-3.3-70b-versatile",
@@ -114,7 +115,8 @@ class MedicalGraphEngine:
         triage_prompt = (
             "You are a medical triage AI. Classify this image into EXACTLY ONE of these categories: "
             "[Chest X-Ray, Bone X-Ray, Abdominal X-Ray, Dental X-Ray, Brain CT, Chest CT, Abdominal CT, "
-            "Spine CT, Mammography, Angiography, DEXA Scan, Unknown]. Respond ONLY with the category name."
+            "Spine CT, Mammography, Angiography, DEXA Scan, Unknown].\n"
+            "CRITICAL: Output ONLY the exact category name. Do not add any other text."
         )
         
         last_message = state["messages"][-1]
@@ -123,7 +125,15 @@ class MedicalGraphEngine:
             last_message
         ])
         
-        modality = response.content.strip()
+        modality_raw = response.content.strip()
+        
+        # FUZZY MATCHING: Ensure we always hit a valid key even if the LLM adds punctuation
+        modality = "Unknown"
+        for key in MODALITY_INSTRUCTIONS.keys():
+            if key.lower() in modality_raw.lower():
+                modality = key
+                break
+                
         metadata = state.get("clinical_metadata", {})
         metadata["modality"] = modality
         
@@ -161,26 +171,39 @@ class MedicalGraphEngine:
         }
 
     def _qa_node(self, state: MedicalAgentState) -> dict:
-        """Answers follow-up questions using the saved memory without generating new reports."""
+        """Answers follow-up questions safely without passing images to the text LLM."""
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage):
             return {}
 
         history = state["clinical_metadata"].get("diagnostic_summary", "No prior analysis found.")
-        modality = state["clinical_metadata"].get("modality", "medical scan")
         
         system_prompt = (
-            f"You are a clinical advisory chatbot. You are having a conversational chat with a user about a {modality}. "
+            f"You are a clinical advisory chatbot having a conversation with a patient. "
             f"Here is the official radiologist report that was already generated:\n"
             f"----------------------\n{history}\n----------------------\n"
-            f"YOUR TASK: Answer the user's questions based ONLY on the report above. "
-            f"DO NOT generate a new radiologist report. Speak conversationally. "
-            f"If the user asks for next steps, suggest standard clinical follow-ups based purely on what the report found."
+            f"CRITICAL INSTRUCTIONS: "
+            f"1. You are in CHAT MODE. DO NOT generate a new radiologist report. DO NOT output 'Findings' or 'Image Description'. "
+            f"2. Answer the user's questions based ONLY on the report above. "
+            f"3. Speak naturally and conversationally. If they ask for next steps, suggest logical clinical follow-ups based purely on what the report found."
         )
+        
+        # PAYLOAD CLEANER: Strip out Base64 images so the Text LLM doesn't panic
+        clean_messages = []
+        for msg in state["messages"]:
+            if isinstance(msg, AIMessage):
+                clean_messages.append(msg)
+            elif isinstance(msg, HumanMessage):
+                if isinstance(msg.content, list):
+                    # Extract only the text portion of the complex message
+                    text_only = next((item["text"] for item in msg.content if item.get("type") == "text"), "[User uploaded an image]")
+                    clean_messages.append(HumanMessage(content=text_only))
+                else:
+                    clean_messages.append(msg)
         
         response = self.text_llm.invoke([
             {"role": "system", "content": system_prompt},
-            *state["messages"]
+            *clean_messages
         ])
         
         return {"messages": [response]}
