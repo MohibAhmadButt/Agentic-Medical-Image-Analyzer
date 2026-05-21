@@ -1,6 +1,6 @@
 """
 LangGraph Multi-Agent Triage Engine with Memory
-Routes images from a Triage Agent to a Specialist Agent, saving context for a QA Agent.
+Routes images from a Triage Agent to a Specialist Agent using Dynamic Chain-of-Sight.
 """
 
 import os
@@ -16,21 +16,49 @@ from typing_extensions import TypedDict
 load_dotenv()
 
 # ============================================================================
-# SPECIALIST KNOWLEDGE BASE
+# SPECIALIST KNOWLEDGE BASE & RADIOLOGICAL TECHNIQUES
 # ============================================================================
-DISEASE_CHECKLISTS = {
-    "Chest X-Ray": "Analyze the lungs and heart. Check specifically for: Pneumonia, Tuberculosis, Lung cancer, COVID-19 pneumonia, Pleural effusion, Pneumothorax, COPD, Cardiomegaly, and Pulmonary edema.",
-    "Brain CT": "Analyze the cranial cavity. Check specifically for: Stroke signs, Brain bleed (hemorrhage), Tumors, Trauma/skull fractures, and Hydrocephalus.",
-    "Bone X-Ray": "Analyze the skeletal structures. Check specifically for: Fractures, Osteoporosis signs, Bone tumors, Arthritis (joint space narrowing), and Osteomyelitis.",
-    "Abdominal X-Ray": "Check specifically for: Bowel obstruction, Kidney stones, Perforation, and Constipation.",
-    "Dental X-Ray": "Check specifically for: Cavities, Impacted teeth, Jaw infection, and Bone loss.",
-    "Chest CT": "Check specifically for: Lung nodules, Cancer, Fibrosis, Pulmonary embolism, and Severe infection.",
-    "Abdominal CT": "Check specifically for: Liver disease, Pancreatitis, Kidney stones, Appendicitis, and Tumors.",
-    "Spine CT": "Check specifically for: Disc disease, Spinal fractures, and Compression.",
-    "Mammography": "Check specifically for: Breast cancer, Calcifications, Cysts, and Dense tissue abnormalities.",
-    "Angiography": "Check specifically for: Aneurysm, Artery blockage, Vascular malformation, and Coronary disease.",
-    "DEXA Scan": "Check specifically for: Osteoporosis and Bone mineral loss.",
-    "Unknown": "Analyze the medical image for any visible anatomical abnormalities."
+MODALITY_INSTRUCTIONS = {
+    "Bone X-Ray": {
+        "technique": "Trace the cortical outlines of every visible bone from end to end. Look specifically for discontinuities, sharp steps, angulations, or displaced fragments.",
+        "checklist": "Fractures, Osteoporosis signs, Bone tumors, Arthritis (joint space narrowing), and Osteomyelitis."
+    },
+    "Chest X-Ray": {
+        "technique": "Use the ABCDE approach: Airway (trachea midline), Breathing (lung fields clear, inspect pleural margins for air/fluid), Circulation (heart size and borders), Disability (rib fractures), Everything else (diaphragm contours).",
+        "checklist": "Pneumonia, Tuberculosis, Lung cancer, COVID-19 pneumonia, Pleural effusion, Pneumothorax, COPD, Cardiomegaly, and Pulmonary edema."
+    },
+    "Brain CT": {
+        "technique": "Evaluate for symmetry. Check for hyperdense areas (acute bleeding), hypodense areas (ischemia/edema), midline shift, mass effect, and ventricular effacement.",
+        "checklist": "Stroke signs, Brain bleed (hemorrhage), Tumors, Trauma/skull fractures, and Hydrocephalus."
+    },
+    "Abdominal X-Ray": {
+        "technique": "Assess bowel gas patterns (look for dilated loops or air-fluid levels), solid organ outlines, and look for abnormal calcifications or free air under the diaphragm.",
+        "checklist": "Bowel obstruction, Kidney stones, Perforation (pneumoperitoneum), and Constipation."
+    },
+    "Dental X-Ray": {
+        "technique": "Examine the enamel cap, dentin, and pulp chamber of each tooth. Assess the alveolar bone levels and the periodontal ligament space.",
+        "checklist": "Cavities (radiolucencies), Impacted teeth, Jaw infection/abscesses, and Bone loss."
+    },
+    "Chest CT": {
+        "technique": "Evaluate lung parenchyma using lung windows, check mediastinal structures using soft tissue windows, and assess for pulmonary emboli or masses.",
+        "checklist": "Lung nodules, Cancer, Fibrosis, Pulmonary embolism, and Severe infection."
+    },
+    "Abdominal CT": {
+        "technique": "Perform a systematic review of solid organs (liver, spleen, kidneys, pancreas), hollow viscus, vessels, and look for free fluid or lymphadenopathy.",
+        "checklist": "Liver disease, Pancreatitis, Kidney stones, Appendicitis, and Tumors."
+    },
+    "Spine CT": {
+        "technique": "Evaluate vertebral body alignment, disk spaces, facet joints, and the spinal canal for narrowing or impingement.",
+        "checklist": "Disc disease, Spinal fractures, and Compression."
+    },
+    "Mammography": {
+        "technique": "Compare bilateral symmetry. Search for spiculated masses, architectural distortion, and clusters of microcalcifications.",
+        "checklist": "Breast cancer, Calcifications, Cysts, and Dense tissue abnormalities."
+    },
+    "Unknown": {
+        "technique": "Perform a systematic visual sweep of the entire image from outside to inside, noting any asymmetries, abnormal densities, or structural disruptions.",
+        "checklist": "Any visible anatomical abnormalities or signs of trauma."
+    }
 }
 
 # ============================================================================
@@ -102,17 +130,17 @@ class MedicalGraphEngine:
         return {"clinical_metadata": metadata}
 
     def _specialist_node(self, state: MedicalAgentState) -> dict:
-        """Analyzes the image using a highly critical Chain-of-Sight technique."""
+        """Analyzes the image using a modality-specific Chain-of-Sight technique."""
         modality = state["clinical_metadata"].get("modality", "Unknown")
-        focus_areas = DISEASE_CHECKLISTS.get(modality, DISEASE_CHECKLISTS["Unknown"])
+        instructions = MODALITY_INSTRUCTIONS.get(modality, MODALITY_INSTRUCTIONS["Unknown"])
         
         system_prompt = (
-            f"You are a highly vigilant, expert trauma radiologist specializing in {modality}. "
-            f"CRITICAL INSTRUCTION: Do NOT assume this image is normal. You must actively search for trauma. "
-            f"1. Trace the cortical outlines of every visible bone or structure from end to end.\n"
-            f"2. Look specifically for discontinuities, sharp steps, angulations, or displaced fragments indicating a fracture or anomaly.\n"
-            f"3. {focus_areas}\n\n"
-            "Provide a structured clinical report. If you see a fracture, describe exactly which bone and where it is located (e.g., mid-shaft, distal). "
+            f"You are a highly vigilant, expert radiologist specializing in {modality}. "
+            f"CRITICAL INSTRUCTION: Do NOT assume this image is normal. You must actively search for pathology using this specific radiological method:\n"
+            f"1. {instructions['technique']}\n"
+            f"2. Check specifically for: {instructions['checklist']}\n\n"
+            "Provide a structured clinical report detailing your findings. State clearly if a condition appears to be present or absent. "
+            "If you see a fracture, mass, or anomaly, describe exactly where it is located. "
             "ALWAYS remind the user that this is an AI educational tool and NOT a substitute for professional medical advice."
         )
         
@@ -147,7 +175,7 @@ class MedicalGraphEngine:
             f"----------------------\n{history}\n----------------------\n"
             f"YOUR TASK: Answer the user's questions based ONLY on the report above. "
             f"DO NOT generate a new radiologist report. Speak conversationally. "
-            f"If the user asks for next steps, suggest standard clinical follow-ups (e.g., casting, surgery consult, pain management) based purely on what the report found."
+            f"If the user asks for next steps, suggest standard clinical follow-ups based purely on what the report found."
         )
         
         response = self.text_llm.invoke([
