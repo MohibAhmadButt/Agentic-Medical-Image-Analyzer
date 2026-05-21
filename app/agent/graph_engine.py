@@ -1,7 +1,7 @@
 """
 LangGraph Multi-Agent Triage Engine with Memory
 Routes images from a Triage Agent to a Specialist Agent using Dynamic Chain-of-Sight.
-Includes Payload Cleaning to protect Text LLMs from Base64 Image panics.
+Includes Payload Cleaning and Reducers to prevent State Amnesia.
 """
 
 import os
@@ -63,11 +63,21 @@ MODALITY_INSTRUCTIONS = {
 }
 
 # ============================================================================
-# STATE DEFINITION
+# STATE REDUCERS & DEFINITION
 # ============================================================================
+def update_metadata(existing: dict, new: dict) -> dict:
+    """Safely merges metadata so follow-up questions don't wipe the memory."""
+    if existing is None:
+        return new if new is not None else {}
+    if new is None:
+        return existing
+    res = existing.copy()
+    res.update(new)
+    return res
+
 class MedicalAgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    clinical_metadata: Dict[str, Any]
+    clinical_metadata: Annotated[dict, update_metadata] # <-- The magic fix for Amnesia
 
 # ============================================================================
 # MULTI-AGENT GRAPH ENGINE
@@ -75,13 +85,11 @@ class MedicalAgentState(TypedDict):
 class MedicalGraphEngine:
     
     def __init__(self):
-        # Vision LLM for Triage and Specialist
         self.vision_llm = ChatGroq(
             api_key=os.environ.get("GROQ_API_KEY"),
             model_name="meta-llama/llama-4-scout-17b-16e-instruct", 
             temperature=0.0
         )
-        # Text LLM for QA Chatbot
         self.text_llm = ChatGroq(
             api_key=os.environ.get("GROQ_API_KEY"),
             model_name="llama-3.3-70b-versatile",
@@ -106,12 +114,12 @@ class MedicalGraphEngine:
         return workflow.compile(checkpointer=self.memory)
     
     def _router(self, state: MedicalAgentState) -> str:
-        if state["clinical_metadata"].get("analysis_complete", False):
+        # Now this will properly remember if analysis is already done!
+        if state.get("clinical_metadata", {}).get("analysis_complete", False):
             return "qa_node"
         return "triage_node"
 
     def _triage_node(self, state: MedicalAgentState) -> dict:
-        """Looks at the image and identifies the modality."""
         triage_prompt = (
             "You are a medical triage AI. Classify this image into EXACTLY ONE of these categories: "
             "[Chest X-Ray, Bone X-Ray, Abdominal X-Ray, Dental X-Ray, Brain CT, Chest CT, Abdominal CT, "
@@ -127,21 +135,16 @@ class MedicalGraphEngine:
         
         modality_raw = response.content.strip()
         
-        # FUZZY MATCHING: Ensure we always hit a valid key even if the LLM adds punctuation
         modality = "Unknown"
         for key in MODALITY_INSTRUCTIONS.keys():
             if key.lower() in modality_raw.lower():
                 modality = key
                 break
                 
-        metadata = state.get("clinical_metadata", {})
-        metadata["modality"] = modality
-        
-        return {"clinical_metadata": metadata}
+        return {"clinical_metadata": {"modality": modality}}
 
     def _specialist_node(self, state: MedicalAgentState) -> dict:
-        """Analyzes the image using a modality-specific Chain-of-Sight technique."""
-        modality = state["clinical_metadata"].get("modality", "Unknown")
+        modality = state.get("clinical_metadata", {}).get("modality", "Unknown")
         instructions = MODALITY_INSTRUCTIONS.get(modality, MODALITY_INSTRUCTIONS["Unknown"])
         
         system_prompt = (
@@ -161,22 +164,20 @@ class MedicalGraphEngine:
             image_message
         ])
         
-        metadata = state["clinical_metadata"]
-        metadata["diagnostic_summary"] = response.content
-        metadata["analysis_complete"] = True
-        
         return {
             "messages": [response],
-            "clinical_metadata": metadata
+            "clinical_metadata": {
+                "diagnostic_summary": response.content,
+                "analysis_complete": True
+            }
         }
 
     def _qa_node(self, state: MedicalAgentState) -> dict:
-        """Answers follow-up questions safely without passing images to the text LLM."""
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage):
             return {}
 
-        history = state["clinical_metadata"].get("diagnostic_summary", "No prior analysis found.")
+        history = state.get("clinical_metadata", {}).get("diagnostic_summary", "No prior analysis found.")
         
         system_prompt = (
             f"You are a clinical advisory chatbot having a conversation with a patient. "
@@ -185,17 +186,16 @@ class MedicalGraphEngine:
             f"CRITICAL INSTRUCTIONS: "
             f"1. You are in CHAT MODE. DO NOT generate a new radiologist report. DO NOT output 'Findings' or 'Image Description'. "
             f"2. Answer the user's questions based ONLY on the report above. "
-            f"3. Speak naturally and conversationally. If they ask for next steps, suggest logical clinical follow-ups based purely on what the report found."
+            f"3. Speak naturally and conversationally. If they ask for next steps, suggest logical clinical follow-ups based purely on what the report found. "
+            f"4. If the user asks for a specific format (e.g., 'in one word', 'bullet points'), you MUST strictly obey that constraint."
         )
         
-        # PAYLOAD CLEANER: Strip out Base64 images so the Text LLM doesn't panic
         clean_messages = []
         for msg in state["messages"]:
             if isinstance(msg, AIMessage):
                 clean_messages.append(msg)
             elif isinstance(msg, HumanMessage):
                 if isinstance(msg.content, list):
-                    # Extract only the text portion of the complex message
                     text_only = next((item["text"] for item in msg.content if item.get("type") == "text"), "[User uploaded an image]")
                     clean_messages.append(HumanMessage(content=text_only))
                 else:
@@ -211,8 +211,8 @@ class MedicalGraphEngine:
     def invoke_with_memory(self, user_message: list, thread_id: str) -> str:
         """Main entry point called by Streamlit."""
         input_state = {
-            "messages": [HumanMessage(content=user_message)],
-            "clinical_metadata": {}
+            "messages": [HumanMessage(content=user_message)]
+            # Removed the empty clinical_metadata dict so it doesn't try to wipe state
         }
         
         config = {"configurable": {"thread_id": thread_id}}
