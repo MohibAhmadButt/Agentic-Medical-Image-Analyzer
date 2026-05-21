@@ -6,13 +6,15 @@ Features an Enterprise Tabbed UI, Quick Actions, and a structured Patient Dossie
 import streamlit as st
 import base64
 import uuid
+
+# Point this to wherever you saved graph_engine.py
 from app.agent.graph_engine import MedicalGraphEngine
 
 st.set_page_config(
     page_title="Medical AI Agent",
     page_icon="🏥",
     layout="wide",
-    initial_sidebar_state="collapsed" # Hide sidebar for a cleaner main view
+    initial_sidebar_state="collapsed"
 )
 
 st.title("🏥 Multi-Agent Medical Image Analyzer")
@@ -29,7 +31,7 @@ if "chat_history" not in st.session_state:
 if "analysis_complete" not in st.session_state:
     st.session_state.analysis_complete = False
 if "patient_records" not in st.session_state:
-    st.session_state.patient_records = [] # To store structured records
+    st.session_state.patient_records = []
 
 # ============================================================================
 # MAIN CONTENT: TABBED INTERFACE
@@ -49,7 +51,7 @@ with tab_diagnostics:
                 
                 if not st.session_state.analysis_complete:
                     if st.button("Start AI Triage & Analysis 🚀", use_container_width=True, type="primary"):
-                        with st.spinner("Triage Agent detecting modality..."):
+                        with st.spinner("Triage Agent detecting modality... Specialist analyzing..."):
                             # Convert Image to Base64
                             bytes_data = uploaded_file.getvalue()
                             base64_image = base64.b64encode(bytes_data).decode('utf-8')
@@ -65,9 +67,7 @@ with tab_diagnostics:
                                     user_message=message_content,
                                     thread_id=st.session_state.thread_id
                                 )
-                                # Save to Chat
                                 st.session_state.chat_history.append({"role": "assistant", "content": response})
-                                # Save to Patient Records
                                 st.session_state.patient_records.append({"file": uploaded_file.name, "report": response})
                                 st.session_state.analysis_complete = True
                                 st.rerun()
@@ -77,19 +77,16 @@ with tab_diagnostics:
     with col_chat:
         st.subheader("💬 Interactive Specialist Q&A")
         
-        # Chat History Container
         chat_container = st.container(height=500, border=True)
         with chat_container:
             if not st.session_state.chat_history:
                 st.info("Upload a scan and run the analysis to begin the clinical discussion.")
             
             for msg in st.session_state.chat_history:
-                # Use custom avatars
                 avatar = "🧑‍⚕️" if msg["role"] == "assistant" else "👤"
                 with st.chat_message(msg["role"], avatar=avatar):
                     st.write(msg["content"])
                     
-        # Quick Actions & Chat Input
         if st.session_state.analysis_complete:
             # Quick Action Buttons
             col_q1, col_q2 = st.columns(2)
@@ -99,7 +96,6 @@ with tab_diagnostics:
             if col_q2.button("What are the next steps?", use_container_width=True):
                 quick_query = "Based on this report, what are the recommended next steps or tests?"
 
-            # Input handling (either from quick buttons or manual typing)
             user_query = st.chat_input("Ask a follow-up question...") or quick_query
             
             if user_query:
