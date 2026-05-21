@@ -7,11 +7,11 @@ Image handling: Uses Base64 encoding to avoid file deletion issues.
 import streamlit as st
 import base64
 import uuid
-from app.agent.graph_engine import MedicalGraphEngine
 
-# ============================================================================
-# PAGE CONFIGURATION & SIDEBAR SETUP
-# ============================================================================
+# IMPORTANT: If your graph_engine.py is in the same folder as this file, use:
+# from graph_engine import MedicalGraphEngine
+# If it is inside an "app/agent/" folder, use:
+from app.agent.graph_engine import MedicalGraphEngine
 
 st.set_page_config(
     page_title="Medical AI Agent",
@@ -20,265 +20,99 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-st.title("🏥 Agentic Medical Image Analyzer")
-st.markdown("Multi-turn Autonomous AI Agent for medical image analysis with patient memory.")
+st.title("🏥 Multi-Agent Medical Image Analyzer")
+st.markdown("Stateful Autonomous AI Agent with specialized Triage and Diagnostic routing.")
 
 # ============================================================================
 # SESSION STATE INITIALIZATION
 # ============================================================================
-
-# Initialize session state variables for persistent memory across reruns
 if "graph_engine" not in st.session_state:
     st.session_state.graph_engine = MedicalGraphEngine()
 
 if "thread_id" not in st.session_state:
-    # Generate a unique thread_id for this Streamlit session
-    # This persists the conversation in LangGraph's memory
     st.session_state.thread_id = str(uuid.uuid4())
-
-if "patient_id" not in st.session_state:
-    st.session_state.patient_id = "patient_default"
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-if "image_b64" not in st.session_state:
-    st.session_state.image_b64 = None
-
-if "image_filename" not in st.session_state:
-    st.session_state.image_filename = None
+if "analysis_complete" not in st.session_state:
+    st.session_state.analysis_complete = False
 
 # ============================================================================
-# HELPER FUNCTIONS
+# SIDEBAR
 # ============================================================================
-
-def convert_image_to_base64(uploaded_file) -> str:
-    """
-    Convert uploaded image to Base64 string.
-    This avoids file deletion issues and enables memory persistence.
-    """
-    image_bytes = uploaded_file.getvalue()
-    base64_string = base64.b64encode(image_bytes).decode("utf-8")
-    return base64_string
-
-
-def get_image_mime_type(filename: str) -> str:
-    """Determine MIME type from filename."""
-    ext = filename.lower().split('.')[-1]
-    mime_types = {
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "png": "image/png"
-    }
-    return mime_types.get(ext, "image/jpeg")
-
-
-# ============================================================================
-# SIDEBAR: SESSION MANAGEMENT & INFO
-# ============================================================================
-
 with st.sidebar:
     st.header("📋 Session Info")
+    st.info(f"**Thread ID:** `{st.session_state.thread_id[:8]}`\n\nThis thread persists your conversation with the AI across page refreshes.")
     
-    # Display current session details
-    st.info(f"""
-    **Thread ID:** `{st.session_state.thread_id[:8]}...`
-    
-    **Patient ID:** `{st.session_state.patient_id}`
-    
-    This thread persists your conversation with the AI across page refreshes.
-    """)
-    
-    # Option to start a new session
     if st.button("🔄 Start New Session", use_container_width=True):
         st.session_state.thread_id = str(uuid.uuid4())
         st.session_state.chat_history = []
-        st.session_state.image_b64 = None
-        st.session_state.image_filename = None
+        st.session_state.analysis_complete = False
         st.rerun()
-    
-    # Custom patient ID input
-    new_patient_id = st.text_input(
-        "Patient ID (optional)",
-        value=st.session_state.patient_id,
-        help="Enter a patient identifier for multi-patient scenarios"
-    )
-    if new_patient_id != st.session_state.patient_id:
-        st.session_state.patient_id = new_patient_id
-    
-    st.divider()
-    
-    # Display chat history
-    st.subheader("💬 Conversation History")
-    if st.session_state.chat_history:
-        with st.expander(f"View {len(st.session_state.chat_history)} messages"):
-            for i, msg in enumerate(st.session_state.chat_history):
-                st.text(f"{i+1}. {msg[:100]}...")
-    else:
-        st.caption("No messages yet. Upload an image to start!")
 
 # ============================================================================
 # MAIN CONTENT AREA
 # ============================================================================
-
-# Create two columns for upload and chat
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("📤 Image Upload")
+    uploaded_file = st.file_uploader("Upload a medical scan (MRI, X-ray, CT)", type=["jpg", "jpeg", "png"])
     
-    uploaded_file = st.file_uploader(
-        "Upload a medical scan (MRI, X-ray, CT, etc.)...",
-        type=["jpg", "jpeg", "png"],
-        help="Maximum 5MB. Supports: JPG, PNG"
-    )
-    
-    if uploaded_file is not None:
-        # --- INPUT VALIDATION ---
-        MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB Limit
+    if uploaded_file and not st.session_state.analysis_complete:
+        st.image(uploaded_file, caption="Target Medical Scan", use_container_width=True)
         
-        if uploaded_file.size > MAX_FILE_SIZE:
-            st.error("❌ File too large! Please upload an image smaller than 5MB.")
-        else:
-            # Display the uploaded image
-            st.image(uploaded_file, caption="Target Medical Scan", use_container_width=True)
-            
-            # --- CONVERT TO BASE64 (No temp file!) ---
-            # Read image immediately and convert to Base64
-            image_b64 = convert_image_to_base64(uploaded_file)
-            st.session_state.image_b64 = image_b64
-            st.session_state.image_filename = uploaded_file.name
-            
-            # Create action buttons
-            col_analyze, col_clear = st.columns(2)
-            
-            with col_analyze:
-                analyze_clicked = st.button("Run AI Agent 🤖", use_container_width=True)
-            
-            with col_clear:
-                clear_clicked = st.button("Clear", use_container_width=True)
-            
-            if analyze_clicked:
+        if st.button("Run Clinical Analysis 🤖", use_container_width=True):
+            with st.spinner("Triage Agent detecting modality... Specialist Agent analyzing..."):
+                
+                # 1. Convert Image to Base64
+                bytes_data = uploaded_file.getvalue()
+                base64_image = base64.b64encode(bytes_data).decode('utf-8')
+                mime_type = "image/png" if uploaded_file.name.lower().endswith("png") else "image/jpeg"
+                
+                # 2. Format the message exactly as Vision models require
+                message_content = [
+                    {"type": "text", "text": "Please analyze this medical scan."},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{base64_image}"}}
+                ]
+                
+                # 3. Invoke Graph
                 try:
-                    with st.spinner("Agent is reasoning and accessing tools..."):
-                        
-                        # --- BUILD IMAGE URL FOR LLM ---
-                        mime_type = get_image_mime_type(uploaded_file.name)
-                        image_url = f"data:{mime_type};base64,{image_b64}"
-                        
-                        # --- INVOKE AGENT WITH MEMORY ---
-                        # Build a prompt that includes the image URL
-                        analysis_prompt = (
-                            f"Please analyze this medical image and provide a detailed professional medical report.\n\n"
-                            f"Image: {image_url}\n\n"
-                            f"Filename: {uploaded_file.name}\n\n"
-                            f"Provide comprehensive analysis including:\n"
-                            f"1. What type of medical scan this is\n"
-                            f"2. Key findings and observations\n"
-                            f"3. Any notable features or anomalies\n"
-                            f"4. Clinical significance\n"
-                            f"5. Recommendations for follow-up"
-                        )
-                        
-                        # Invoke the graph engine with persistent memory (thread_id)
-                        response = st.session_state.graph_engine.invoke_with_memory(
-                            user_message=analysis_prompt,
-                            thread_id=st.session_state.thread_id,
-                            patient_id=st.session_state.patient_id
-                        )
-                        
-                        # Store in session history
-                        st.session_state.chat_history.append(f"User: Uploaded and analyzed image - {uploaded_file.name}")
-                        st.session_state.chat_history.append(f"Agent: {response[:200]}...")
-                        
-                        st.success("✅ Analysis Complete!")
-                        
-                        # --- VISUAL CONFIDENCE METER ---
-                        st.markdown("### 📊 Agent Assessment Metrics")
-                        st.progress(0.95, text="Agent Decision Confidence: Very High")
-                        
-                        # --- MEDICAL REPORT ---
-                        st.markdown("### 📝 Agent's Medical Report")
-                        st.info(response)
-                        
+                    response = st.session_state.graph_engine.invoke_with_memory(
+                        user_message=message_content,
+                        thread_id=st.session_state.thread_id
+                    )
+                    st.session_state.chat_history.append({"role": "assistant", "content": response})
+                    st.session_state.analysis_complete = True
+                    st.rerun()
                 except Exception as e:
-                    st.error(f"⚠️ An error occurred: {e}")
-                    st.warning("Ensure your GROQ_API_KEY and LANGCHAIN_API_KEY are correct in your .env file.")
-            
-            if clear_clicked:
-                st.session_state.image_b64 = None
-                st.session_state.image_filename = None
-                st.rerun()
+                    st.error(f"Error during analysis: {e}")
 
 with col2:
-    st.subheader("💬 Follow-up Q&A")
+    st.subheader("💬 Interactive QA")
+    st.markdown("Ask follow-up questions about the findings.")
     
-    st.markdown("""
-    After analyzing an image, ask follow-up questions about the findings.
-    The AI remembers previous analyses in this conversation.
-    """)
-    
-    # Display chat messages
-    if st.session_state.chat_history:
-        with st.container(border=True):
-            for msg in st.session_state.chat_history:
-                if msg.startswith("User:"):
-                    st.write(f"**👤 {msg}**")
-                else:
-                    st.write(f"🤖 {msg}")
-    
-    # Input area for follow-up questions
-    st.markdown("---")
-    
-    if st.session_state.image_b64 or st.session_state.chat_history:
-        user_question = st.text_input(
-            "Ask a follow-up question about the analysis...",
-            placeholder="e.g., 'What do these findings suggest?' or 'How serious is this?'",
-            key="followup_input"
-        )
-        
-        if user_question:
-            if st.button("Send 📨", use_container_width=True):
-                try:
-                    with st.spinner("Agent is thinking..."):
-                        
-                        # Invoke the agent with the follow-up question
-                        # The thread_id ensures it accesses the same memory
-                        response = st.session_state.graph_engine.invoke_with_memory(
-                            user_message=user_question,
-                            thread_id=st.session_state.thread_id,
-                            patient_id=st.session_state.patient_id
-                        )
-                        
-                        # Add to chat history
-                        st.session_state.chat_history.append(f"User: {user_question}")
-                        st.session_state.chat_history.append(f"Agent: {response}")
-                        
-                        st.success("✅ Response received!")
-                        st.info(response)
-                        st.rerun()
+    with st.container(height=500, border=True):
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]):
+                st.write(msg["content"])
                 
-                except Exception as e:
-                    st.error(f"⚠️ Error: {e}")
-    
+    if st.session_state.analysis_complete:
+        if user_query := st.chat_input("e.g., 'What do these findings suggest?'"):
+            # Display user message instantly
+            st.session_state.chat_history.append({"role": "user", "content": user_query})
+            with st.chat_message("user"):
+                st.write(user_query)
+            
+            with st.spinner("Agent is thinking..."):
+                # Pass just the text query to the memory engine
+                response = st.session_state.graph_engine.invoke_with_memory(
+                    user_message=[{"type": "text", "text": user_query}],
+                    thread_id=st.session_state.thread_id
+                )
+                
+            st.session_state.chat_history.append({"role": "assistant", "content": response})
+            st.rerun()
     else:
-        st.caption("📌 Upload an image and analyze it first to ask follow-up questions.")
-
-# ============================================================================
-# FOOTER
-# ============================================================================
-
-st.divider()
-st.markdown("""
-### ⚠️ Medical Disclaimer
-This is an **AI-powered educational tool** and **NOT a substitute for professional medical advice**.
-Always consult with qualified healthcare professionals for accurate diagnosis and treatment.
-
-**Key Privacy Notes:**
-- Images are converted to Base64 and stored in session memory (not written to disk).
-- Conversation history is stored in LangGraph's memory (MemorySaver) for this session only.
-- Thread IDs enable multi-turn conversations but are session-specific.
-- No temporary files are created or left behind on the server.
-""")
-
-st.caption(f"Last updated: Session {st.session_state.thread_id[:8]}...")
+        st.caption("📌 Upload an image and run analysis to begin the chat.")
