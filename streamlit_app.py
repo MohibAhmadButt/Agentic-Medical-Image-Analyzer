@@ -1,11 +1,11 @@
 """
 Streamlit UI for Agentic Medical Image Analyzer
 Features persistent session memory for multi-turn Q&A conversations.
+Image handling: Uses Base64 encoding to avoid file deletion issues.
 """
 
 import streamlit as st
-import tempfile
-import os
+import base64
 import uuid
 from app.agent.graph_engine import MedicalGraphEngine
 
@@ -42,8 +42,36 @@ if "patient_id" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-if "current_image_path" not in st.session_state:
-    st.session_state.current_image_path = None
+if "image_b64" not in st.session_state:
+    st.session_state.image_b64 = None
+
+if "image_filename" not in st.session_state:
+    st.session_state.image_filename = None
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def convert_image_to_base64(uploaded_file) -> str:
+    """
+    Convert uploaded image to Base64 string.
+    This avoids file deletion issues and enables memory persistence.
+    """
+    image_bytes = uploaded_file.getvalue()
+    base64_string = base64.b64encode(image_bytes).decode("utf-8")
+    return base64_string
+
+
+def get_image_mime_type(filename: str) -> str:
+    """Determine MIME type from filename."""
+    ext = filename.lower().split('.')[-1]
+    mime_types = {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png"
+    }
+    return mime_types.get(ext, "image/jpeg")
+
 
 # ============================================================================
 # SIDEBAR: SESSION MANAGEMENT & INFO
@@ -65,7 +93,8 @@ with st.sidebar:
     if st.button("🔄 Start New Session", use_container_width=True):
         st.session_state.thread_id = str(uuid.uuid4())
         st.session_state.chat_history = []
-        st.session_state.current_image_path = None
+        st.session_state.image_b64 = None
+        st.session_state.image_filename = None
         st.rerun()
     
     # Custom patient ID input
@@ -114,6 +143,12 @@ with col1:
             # Display the uploaded image
             st.image(uploaded_file, caption="Target Medical Scan", use_container_width=True)
             
+            # --- CONVERT TO BASE64 (No temp file!) ---
+            # Read image immediately and convert to Base64
+            image_b64 = convert_image_to_base64(uploaded_file)
+            st.session_state.image_b64 = image_b64
+            st.session_state.image_filename = uploaded_file.name
+            
             # Create action buttons
             col_analyze, col_clear = st.columns(2)
             
@@ -127,17 +162,23 @@ with col1:
                 try:
                     with st.spinner("Agent is reasoning and accessing tools..."):
                         
-                        # Create a safe temporary file for the agent to read
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-                            tmp_file.write(uploaded_file.getvalue())
-                            tmp_path = tmp_file.name.replace("\\", "/")
-                        
-                        # Store the image path in session for follow-up questions
-                        st.session_state.current_image_path = tmp_path
+                        # --- BUILD IMAGE URL FOR LLM ---
+                        mime_type = get_image_mime_type(uploaded_file.name)
+                        image_url = f"data:{mime_type};base64,{image_b64}"
                         
                         # --- INVOKE AGENT WITH MEMORY ---
-                        # Build a detailed prompt for the agent
-                        analysis_prompt = f"Please analyze the medical image at path '{tmp_path}'. Provide a detailed professional medical report."
+                        # Build a prompt that includes the image URL
+                        analysis_prompt = (
+                            f"Please analyze this medical image and provide a detailed professional medical report.\n\n"
+                            f"Image: {image_url}\n\n"
+                            f"Filename: {uploaded_file.name}\n\n"
+                            f"Provide comprehensive analysis including:\n"
+                            f"1. What type of medical scan this is\n"
+                            f"2. Key findings and observations\n"
+                            f"3. Any notable features or anomalies\n"
+                            f"4. Clinical significance\n"
+                            f"5. Recommendations for follow-up"
+                        )
                         
                         # Invoke the graph engine with persistent memory (thread_id)
                         response = st.session_state.graph_engine.invoke_with_memory(
@@ -163,15 +204,10 @@ with col1:
                 except Exception as e:
                     st.error(f"⚠️ An error occurred: {e}")
                     st.warning("Ensure your GROQ_API_KEY and LANGCHAIN_API_KEY are correct in your .env file.")
-                
-                finally:
-                    # --- DATA PRIVACY ---
-                    # Remove the scan from the server immediately after analysis
-                    if 'tmp_path' in locals() and os.path.exists(tmp_path):
-                        os.remove(tmp_path)
             
             if clear_clicked:
-                st.session_state.current_image_path = None
+                st.session_state.image_b64 = None
+                st.session_state.image_filename = None
                 st.rerun()
 
 with col2:
@@ -194,7 +230,7 @@ with col2:
     # Input area for follow-up questions
     st.markdown("---")
     
-    if st.session_state.current_image_path or st.session_state.chat_history:
+    if st.session_state.image_b64 or st.session_state.chat_history:
         user_question = st.text_input(
             "Ask a follow-up question about the analysis...",
             placeholder="e.g., 'What do these findings suggest?' or 'How serious is this?'",
@@ -239,9 +275,10 @@ This is an **AI-powered educational tool** and **NOT a substitute for profession
 Always consult with qualified healthcare professionals for accurate diagnosis and treatment.
 
 **Key Privacy Notes:**
-- Uploaded images are temporarily stored and deleted after analysis.
+- Images are converted to Base64 and stored in session memory (not written to disk).
 - Conversation history is stored in LangGraph's memory (MemorySaver) for this session only.
 - Thread IDs enable multi-turn conversations but are session-specific.
+- No temporary files are created or left behind on the server.
 """)
 
 st.caption(f"Last updated: Session {st.session_state.thread_id[:8]}...")
