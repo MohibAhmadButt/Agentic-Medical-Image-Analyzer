@@ -1,60 +1,111 @@
-from transformers import pipeline
-from PIL import Image
 import io
+import os
+from typing import Dict, List, Union
+import open_clip
+from PIL import Image
+import torch
 
-class MedicalFeatureExtractor:
-    def __init__(self):
-        # 1. Load an official, bulletproof Foundation Model (OpenAI's CLIP)
-        print("Downloading Foundation Model... (This will definitely work!)")
-        
-        # We use zero-shot classification, which lets us define our own labels on the fly!
-        self.classifier = pipeline("zero-shot-image-classification", model="openai/clip-vit-base-patch32")
 
-    def extract(self, image_bytes):
-        # 2. Open the image so Python can read it
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        
-        # 3. DEFINE our own categories! (The Ultimate Triage List)
-        candidate_labels = [
-            # --- Brain & Head ---
-            "healthy normal brain MRI",
-            "brain MRI showing a tumor or lesion",
-            
-            # --- Chest & Lungs ---
-            "chest x-ray showing normal healthy lungs",
-            "chest x-ray showing pneumonia or fluid in the lungs",
-            
-            # --- Bones & Skeletal ---
-            "x-ray of a normal healthy bone or joint",
-            "x-ray showing a broken bone or fracture",
-            "dental x-ray of teeth",
-            
-            # --- Skin (Dermatology) ---
-            "photograph of normal healthy human skin",
-            "dermatology photograph of a skin rash or eczema",
-            "dermatology photograph of a dark skin lesion or melanoma",
-            
-            # --- Eyes (Ophthalmology) ---
-            "retinal fundus photograph of a healthy eye",
-            "retinal fundus photograph showing eye disease or diabetic retinopathy",
-            
-            # --- Microscopic & Labs ---
-            "microscopic slide of blood cells or tissue",
-            
-            # --- THE SAFETY NET ---
-            "a non-medical everyday photograph of a random object, animal, or scenery"
-        ]
-        
-        # 4. Ask the AI to classify the image based ONLY on our custom labels
-        results = self.classifier(image, candidate_labels=candidate_labels)
-        
-        # 5. Extract the highest confidence result
-        # The pipeline returns a list sorted from highest to lowest confidence
-        top_result = results[0]
-        category_name = top_result['label'].title()
-        score = top_result['score']
-        
-        return {
-            "detected_feature": category_name, 
-            "confidence_percent": round(score * 100, 2)
-        }
+class BiomedFeatureExtractor:
+
+  def __init__(self, device: str = None):
+    self.device = (
+        device
+        if device
+        else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+
+    # Load Microsoft BiomedCLIP
+    self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+        "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+    )
+    self.tokenizer = open_clip.get_tokenizer(
+        "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+    )
+    self.model.to(self.device)
+    self.model.eval()
+
+    # Pre-defined clinical taxonomy
+    self.modalities = [
+        "chest x-ray",
+        "brain mri",
+        "ct scan",
+        "bone radiograph / x-ray",
+        "dental panoramic radiograph",
+        "histopathology slide",
+    ]
+
+    self.pathology_candidates = [
+        "normal healthy scan with no obvious abnormality",
+        "pneumonia or consolidation",
+        "pleural effusion",
+        "pulmonary edema",
+        "cardiomegaly / enlarged cardiac silhouette",
+        "bone fracture or cortical disruption",
+        "intracranial hemorrhage or mass lesion",
+        "acute ischemic stroke / cerebral infarction",
+        "dental caries or periapical lesion",
+        "degenerative joint disease or osteoarthritis",
+    ]
+
+  def _load_image(self, image_input: Union[str, bytes]) -> Image.Image:
+    if isinstance(image_input, bytes):
+      return Image.open(io.BytesIO(image_input)).convert("RGB")
+    return Image.open(image_input).convert("RGB")
+
+  def analyze_image(
+      self,
+      image_input: Union[str, bytes],
+      custom_labels: List[str] = None,
+  ) -> Dict:
+    image = self._load_image(image_input)
+    image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
+
+    # 1. Modality Classification
+    modality_tokens = self.tokenizer(
+        [f"a medical image of {m}" for m in self.modalities]
+    ).to(self.device)
+
+    # 2. Pathology Classification
+    labels_to_test = custom_labels or self.pathology_candidates
+    pathology_tokens = self.tokenizer(
+        [f"medical scan demonstrating {p}" for p in labels_to_test]
+    ).to(self.device)
+
+    with torch.no_grad():
+      image_feat = self.model.encode_image(image_tensor)
+      image_feat /= image_feat.norm(dim=-1, keepdim=True)
+
+      # Evaluate Modality
+      mod_feat = self.model.encode_text(modality_tokens)
+      mod_feat /= mod_feat.norm(dim=-1, keepdim=True)
+      mod_probs = (
+          (100.0 * image_feat @ mod_feat.T).softmax(dim=-1).cpu().numpy()[0]
+      )
+      detected_modality = self.modalities[mod_probs.argmax()]
+
+      # Evaluate Pathologies
+      path_feat = self.model.encode_text(pathology_tokens)
+      path_feat /= path_feat.norm(dim=-1, keepdim=True)
+      path_probs = (
+          (100.0 * image_feat @ path_feat.T).softmax(dim=-1).cpu().numpy()[0]
+      )
+
+    ranked_pathologies = sorted(
+        [
+            {"finding": label, "confidence": round(float(prob) * 100, 2)}
+            for label, prob in zip(labels_to_test, path_probs)
+        ],
+        key=lambda x: x["confidence"],
+        reverse=True,
+    )
+
+    return {
+        "detected_modality": detected_modality,
+        "modality_confidence": round(float(mod_probs.max()) * 100, 2),
+        "primary_finding": ranked_pathologies[0],
+        "differential_findings": ranked_pathologies[:4],
+    }
+
+
+cv_extractor = BiomedFeatureExtractor()
