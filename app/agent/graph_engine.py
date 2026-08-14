@@ -1,10 +1,10 @@
 """
-LangGraph Multi-Agent Clinical Triage Engine with Stateful Memory.
-Routes telemetry through structured specialist nodes and maintains conversation state.
+LangGraph Multi-Agent Clinical Reasoning Engine with Stateful Memory.
+Routes BiomedCLIP vision telemetry through specialized radiology protocols using LLaMA 3.3 70B.
 """
 
 import os
-from typing import Annotated, Dict, Any, List, Literal
+from typing import Annotated, Dict, Any, List
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
@@ -16,35 +16,66 @@ from typing_extensions import TypedDict
 load_dotenv()
 
 # ============================================================================
-# CLINICAL RADIOLOGY GUIDELINES
+# SPECIALIST KNOWLEDGE BASE & RADIOLOGICAL PROTOCOLS
 # ============================================================================
 MODALITY_PROTOCOLS = {
-    "Chest X-Ray": {
-        "focus": "Inspect lung fields for opacities, cardiomegaly, pleural effusions, and pneumothorax.",
-        "checklist": "Pneumonia, Effusion, Infiltrates, Cardiomegaly, Fractures."
-    },
     "Bone Radiograph / X-Ray": {
-        "focus": "Trace cortical margins for discontinuities, dislocations, and bone density variations.",
-        "checklist": "Cortical disruption, Joint space narrowing, Dislocation, Osteolysis."
+        "technique": (
+            "Systematically trace cortical outlines from end to end. Evaluate bone density, "
+            "trabecular patterns, Shenton's line (for hips/pelvis), joint spaces, and look for sharp steps, "
+            "subcapital/cervical angulations, or displaced fracture fragments."
+        ),
+        "checklist": (
+            "Femoral neck fractures, cortical disruption, avulsion fractures, dislocations, "
+            "osteopenia/osteoporosis, joint space narrowing, and avascular necrosis risk."
+        )
+    },
+    "Chest X-Ray": {
+        "technique": (
+            "Use the systematic ABCDE approach: Airway (tracheal alignment), Breathing (bilateral lung fields, "
+            "costophrenic angles, infiltrates), Circulation (cardiothoracic ratio < 0.5), Disability (rib/clavicle fractures), "
+            "Everything else (diaphragm contours, gastric bubble)."
+        ),
+        "checklist": (
+            "Pneumonia, pulmonary consolidation, pleural effusion, pneumothorax, "
+            "pulmonary edema, cardiomegaly, and lung nodules."
+        )
     },
     "Brain CT / MRI": {
-        "focus": "Evaluate midline shift, symmetry, hyperdense acute hemorrhage, or hypodense ischemic infarcts.",
-        "checklist": "Mass effect, Ischemic stroke, Subdural/Epidural bleed, Edema."
+        "technique": (
+            "Evaluate cerebral symmetry. Search for hyperdense areas (acute hemorrhage/blood), "
+            "hypodense territories (ischemic infarcts/edema), midline shift, mass effect, and ventricular compression."
+        ),
+        "checklist": (
+            "Acute ischemic stroke, intracranial hemorrhage (subdural/epidural/intracerebral), "
+            "mass lesion, cerebral edema, and skull fractures."
+        )
     },
     "Dental Panorex": {
-        "focus": "Examine enamel integrity, alveolar bone levels, and apical radiolucencies.",
-        "checklist": "Periapical lesion, Deep caries, Impaction, Periodontal bone loss."
+        "technique": (
+            "Examine enamel-dentin boundaries, pulp chambers, alveolar bone crest levels, "
+            "and periapical periodontal ligament spaces across maxillary and mandibular arches."
+        ),
+        "checklist": (
+            "Dental caries, periapical abscesses, impacted third molars, alveolar bone loss, and jaw cysts."
+        )
     },
     "Abdominal Scan": {
-        "focus": "Assess bowel gas distribution, free peritoneal air, and organ borders.",
-        "checklist": "Obstruction, Free fluid, Calcifications, Perforation."
+        "technique": (
+            "Assess bowel gas pattern (air-fluid levels, dilated loops), psoas muscle shadows, "
+            "calcifications, and check for free peritoneal air under the diaphragm."
+        ),
+        "checklist": (
+            "Bowel obstruction, pneumoperitoneum (perforation), kidney stones, and ascites."
+        )
     }
 }
 
 # ============================================================================
-# STATE DEFINITION & PERSISTENCE REDUCER
+# STATE DEFINITION & METADATA MERGER
 # ============================================================================
 def merge_metadata(current: dict, update: dict) -> dict:
+    """Safely merges metadata so follow-up chat messages never overwrite prior diagnostic data."""
     if current is None:
         return update if update is not None else {}
     if update is None:
@@ -58,15 +89,15 @@ class ClinicalAgentState(TypedDict):
     session_metadata: Annotated[dict, merge_metadata]
 
 # ============================================================================
-# ENGINE PIPELINE
+# GRAPH ENGINE
 # ============================================================================
 class MedicalGraphEngine:
     def __init__(self, api_key: str = None):
-        groq_api_key = api_key or os.environ.get("GROQ_API_KEY")
+        groq_key = api_key or os.environ.get("GROQ_API_KEY")
         
-        # High-performance LLaMA 3.3 70B reasoning engine
+        # High-performance LLaMA 3.3 70B via Groq
         self.llm = ChatGroq(
-            api_key=groq_api_key,
+            api_key=groq_key,
             model_name="llama-3.3-70b-versatile",
             temperature=0.1
         )
@@ -74,18 +105,18 @@ class MedicalGraphEngine:
         self.graph = self._build_graph()
 
     def _build_graph(self):
-        builder = StateGraph(ClinicalAgentState)
+        workflow = StateGraph(ClinicalAgentState)
 
-        builder.add_node("triage_node", self._triage_node)
-        builder.add_node("specialist_node", self._specialist_node)
-        builder.add_node("qa_node", self._qa_node)
+        workflow.add_node("triage_node", self._triage_node)
+        workflow.add_node("specialist_node", self._specialist_node)
+        workflow.add_node("qa_node", self._qa_node)
 
-        builder.add_conditional_edges(START, self._router)
-        builder.add_edge("triage_node", "specialist_node")
-        builder.add_edge("specialist_node", "qa_node")
-        builder.add_edge("qa_node", END)
+        workflow.add_conditional_edges(START, self._router)
+        workflow.add_edge("triage_node", "specialist_node")
+        workflow.add_edge("specialist_node", "qa_node")
+        workflow.add_edge("qa_node", END)
 
-        return builder.compile(checkpointer=self.memory)
+        return workflow.compile(checkpointer=self.memory)
 
     def _router(self, state: ClinicalAgentState) -> str:
         if state.get("session_metadata", {}).get("report_generated", False):
@@ -93,46 +124,55 @@ class MedicalGraphEngine:
         return "triage_node"
 
     def _triage_node(self, state: ClinicalAgentState) -> dict:
-        input_modality = state.get("session_metadata", {}).get("modality_hint", "Chest X-Ray")
+        modality_hint = state.get("session_metadata", {}).get("standard_modality", "Bone Radiograph / X-Ray")
         
-        # Match against designated protocols
-        selected_modality = "Chest X-Ray"
-        for key in MODALITY_PROTOCOLS:
-            if key.lower() in input_modality.lower() or input_modality.lower() in key.lower():
+        selected_modality = "Bone Radiograph / X-Ray"
+        for key in MODALITY_PROTOCOLS.keys():
+            if key.lower() in modality_hint.lower() or modality_hint.lower() in key.lower():
                 selected_modality = key
                 break
 
         return {"session_metadata": {"active_modality": selected_modality}}
 
     def _specialist_node(self, state: ClinicalAgentState) -> dict:
-        modality = state.get("session_metadata", {}).get("active_modality", "Chest X-Ray")
-        protocol = MODALITY_PROTOCOLS.get(modality, MODALITY_PROTOCOLS["Chest X-Ray"])
-        visual_findings = state.get("session_metadata", {}).get("findings_summary", "Standard density screening.")
+        modality = state.get("session_metadata", {}).get("active_modality", "Bone Radiograph / X-Ray")
+        protocol = MODALITY_PROTOCOLS.get(modality, MODALITY_PROTOCOLS["Bone Radiograph / X-Ray"])
+        
+        primary_finding = state.get("session_metadata", {}).get("primary_finding", "No primary finding")
+        differentials = state.get("session_metadata", {}).get("differentials", "None")
+        confidence = state.get("session_metadata", {}).get("modality_confidence", "N/A")
 
         system_instruction = (
-            f"You are a Senior Radiologist and Clinical Decision Support AI specializing in {modality}.\n"
-            f"CLINICAL PROTOCOL:\n"
-            f"- Primary Focus: {protocol['focus']}\n"
-            f"- Diagnostic Checklist: {protocol['checklist']}\n"
-            f"- Scan Biomarker Observations: {visual_findings}\n\n"
-            f"Generate a rigorous structured report with the following markdown format:\n"
+            f"You are a Senior Consulting Radiologist and AI Clinical Decision Support Specialist.\n"
+            f"You are analyzing telemetry from Microsoft's BiomedCLIP vision foundation model for a **{modality}**.\n\n"
+            f"### BIOMEDICAL VISION FINDINGS:\n"
+            f"- Modality: {modality} (Detection Confidence: {confidence}%)\n"
+            f"- Primary Pathology Marker: {primary_finding}\n"
+            f"- Differential Findings: {differentials}\n\n"
+            f"### RADIOLOGICAL PROTOCOL FOR {modality.upper()}:\n"
+            f"- Systematic Technique: {protocol['technique']}\n"
+            f"- Pathology Checklist: {protocol['checklist']}\n\n"
+            f"### INSTRUCTIONS:\n"
+            f"Generate a rigorous, professional clinical report strictly following this markdown structure:\n\n"
             f"### 📋 Primary Diagnostic Impression\n"
-            f"[Direct diagnostic impression detailing likely pathology or clear status]\n\n"
+            f"[Provide a definitive, clear clinical statement of the finding, e.g. Left Femoral Neck Fracture, Transcervical Type]\n\n"
             f"### 🔬 Detailed Observations & Localization\n"
-            f"[Systematic breakdown of anatomical structures and visual densities]\n\n"
+            f"[Detail anatomical landmarks: Cortical continuity, Shenton's line, joint alignment, displacement, and density]\n\n"
             f"### 📊 Differential Diagnoses\n"
-            f"- Primary Suspect (with clinical justification)\n"
-            f"- Secondary Differential\n\n"
+            f"- **Primary Suspect:** (Explain reasoning based on visual evidence and risk of avascular necrosis/complications)\n"
+            f"- **Secondary Differential:** (Alternative considerations)\n\n"
             f"### ⚠️ Urgency Level\n"
-            f"**[Routine | Expedited | Immediate Emergency]**\n\n"
-            f"### 💡 Recommended Next Steps\n"
-            f"[Actionable clinical steps, confirmatory imaging, or lab tests]\n\n"
-            f"---\n*Disclaimer: AI decision-support utility. All findings require clinical confirmation.*"
+            f"**[Routine | Expedited | Immediate / Emergency Orthopedic/Clinical Evaluation]**\n\n"
+            f"### 💡 Recommended Clinical Next Steps\n"
+            f"- Immediate stabilization / non-weight-bearing\n"
+            f"- Urgent orthopedic consultation (e.g. surgical fixation vs. hemiarthroplasty)\n"
+            f"- Confirmatory cross-table lateral imaging or CT\n\n"
+            f"---\n*Disclaimer: AI clinical decision-support utility. Requires verification by a certified radiologist/physician.*"
         )
 
         response = self.llm.invoke([
             SystemMessage(content=system_instruction),
-            HumanMessage(content=f"Synthesize the complete radiological consultation report for this {modality} scan.")
+            HumanMessage(content=f"Synthesize the comprehensive radiology report for this {modality} scan.")
         ])
 
         return {
@@ -152,12 +192,16 @@ class MedicalGraphEngine:
         modality = state.get("session_metadata", {}).get("active_modality", "Medical Scan")
 
         system_prompt = (
-            f"You are a clinical advisory specialist discussing a previously analyzed {modality} scan.\n"
-            f"REPORT IN CONTEXT:\n----------------\n{report}\n----------------\n\n"
-            f"INSTRUCTIONS:\n"
-            f"1. You are in interactive chat mode. Do not generate a new report template.\n"
-            f"2. Answer user questions directly, empathetically, and accurately based on the report findings.\n"
-            f"3. Strictly obey user formatting constraints (e.g. short summary, single sentence, bullet points)."
+            f"You are a clinical specialist discussing an analyzed {modality} with a patient or physician.\n"
+            f"OFFICIAL REPORT SUMMARY IN CONTEXT:\n"
+            f"--------------------------------------------------\n"
+            f"{report}\n"
+            f"--------------------------------------------------\n\n"
+            f"RULES:\n"
+            f"1. You are in interactive chat mode. DO NOT output a new report header.\n"
+            f"2. Answer user questions directly, empathetically, and accurately based on the report findings above.\n"
+            f"3. Explain treatment implications (e.g. surgery, screws, hip replacement, non-weight-bearing) if asked.\n"
+            f"4. Obey formatting constraints strictly (e.g. short summaries, bullet points)."
         )
 
         clean_history = []
