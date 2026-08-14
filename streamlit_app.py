@@ -11,6 +11,7 @@ if "GROQ_API_KEY" in st.secrets and not os.environ.get("GROQ_API_KEY"):
 
 from app.agent.graph_engine import MedicalGraphEngine
 from app.cv.feature_extractor import cv_extractor
+from app.utils.pdf_generator import build_clinical_pdf
 
 # -----------------------------------------------------------------------------
 # PAGE SETUP & RESOURCE CACHING
@@ -89,7 +90,6 @@ with tab_diag:
         if uploaded_file is not None:
             raw_img = Image.open(uploaded_file).convert("RGB")
 
-            # Execute Analysis Button
             if st.button("🔍 Execute Agentic Analysis", type="primary", use_container_width=True):
                 with st.spinner("Extracting zero-shot BiomedCLIP features & generating attention heatmap..."):
                     # 1. Feature Extraction & Visual Saliency
@@ -124,16 +124,35 @@ with tab_diag:
                 st.image(raw_img, caption="Active Patient Scan", use_container_width=True)
 
             # Diagnostic Report Display
-            if st.session_state.current_report:
+            if st.session_state.current_report and st.session_state.cv_telemetry:
                 st.divider()
                 st.success("✅ Diagnostic Consultation Ready")
                 
-                if st.session_state.cv_telemetry:
-                    top_f = st.session_state.cv_telemetry["primary_finding"]
-                    st.caption(f"🔬 **Vision Detection:** `{top_f['finding']}` ({top_f['confidence']}% confidence)")
+                top_f = st.session_state.cv_telemetry["primary_finding"]
+                st.caption(f"🔬 **Vision Detection:** `{top_f['finding']}` ({top_f['confidence']}% confidence)")
 
                 with st.expander("📄 View Official Specialist Report", expanded=True):
                     st.markdown(st.session_state.current_report)
+
+                # PDF Export Button
+                if st.session_state.heatmap_image is not None:
+                    pdf_bytes = build_clinical_pdf(
+                        thread_id=st.session_state.thread_id,
+                        modality=st.session_state.cv_telemetry["standard_modality"],
+                        primary_finding=top_f["finding"],
+                        confidence=top_f["confidence"],
+                        report_markdown=st.session_state.current_report,
+                        original_img=raw_img,
+                        heatmap_img=st.session_state.heatmap_image
+                    )
+
+                    st.download_button(
+                        label="📥 Download Official Clinical PDF Report",
+                        data=pdf_bytes,
+                        file_name=f"Consultation_Report_{st.session_state.thread_id}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
 
     # --- RIGHT COLUMN: INTERACTIVE SPECIALIST Q&A ---
     with col_right:
