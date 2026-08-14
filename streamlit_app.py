@@ -3,20 +3,15 @@ import os
 import uuid
 from PIL import Image
 
-# -----------------------------------------------------------------------------
-# BRIDGE STREAMLIT SECRETS TO OS ENVIRONMENT
-# -----------------------------------------------------------------------------
+# Bridge Streamlit Secrets
 if "GROQ_API_KEY" in st.secrets and not os.environ.get("GROQ_API_KEY"):
     os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 
-# Import Core Engines & Utilities
 from app.agent.graph_engine import MedicalGraphEngine
 from app.cv.feature_extractor import cv_extractor
+from app.cv.dicom_parser import WINDOW_PRESETS
 from app.utils.pdf_generator import build_clinical_pdf
 
-# -----------------------------------------------------------------------------
-# PAGE SETUP & RESOURCE CACHING
-# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Multi-Agent Medical Image Analyzer",
     page_icon="🏥",
@@ -30,7 +25,6 @@ def get_engine():
     return MedicalGraphEngine()
 
 
-# Initialize Session State
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())[:8]
 
@@ -49,6 +43,9 @@ if "cv_telemetry" not in st.session_state:
 if "heatmap_image" not in st.session_state:
     st.session_state.heatmap_image = None
 
+if "rendered_rgb" not in st.session_state:
+    st.session_state.rendered_rgb = None
+
 if "engine" not in st.session_state:
     st.session_state.engine = get_engine()
 
@@ -60,30 +57,40 @@ def reset_session():
     st.session_state.current_report = None
     st.session_state.cv_telemetry = None
     st.session_state.heatmap_image = None
+    st.session_state.rendered_rgb = None
     st.rerun()
 
 
-# -----------------------------------------------------------------------------
-# UI LAYOUT
-# -----------------------------------------------------------------------------
 st.title("🏥 Multi-Agent Medical Image Analyzer")
 
 tab_diag, tab_dossier = st.tabs(["🩺 Diagnostics & Chat", "📁 Patient Dossier"])
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # TAB 1: DIAGNOSTICS & CHAT
-# =============================================================================
+# -----------------------------------------------------------------------------
 with tab_diag:
     col_left, col_right = st.columns([1, 1], gap="large")
 
-    # --- LEFT COLUMN: SCAN UPLOAD & VISUAL LOCALIZATION ---
     with col_left:
-        st.subheader("📤 Scan Upload & Triage")
+        st.subheader("📤 Scan Upload & PACS Triage")
         uploaded_file = st.file_uploader(
-            "Upload Scan (Pelvis/Hip X-ray, Chest X-ray, Brain CT/MRI)",
-            type=["jpg", "jpeg", "png"],
-            help="Processed via Microsoft BiomedCLIP Hierarchical Ensembles and LLaMA 3.3 70B."
+            "Upload Medical Scan (DICOM .dcm, PNG, JPG, JPEG)",
+            type=["dcm", "jpg", "jpeg", "png"],
+            help="Accepts native 16-bit DICOM radiographs/CTs or standard images."
         )
+
+        is_dcm = False
+        if uploaded_file is not None:
+            is_dcm = uploaded_file.name.lower().endswith(".dcm")
+
+        # Dynamic Window Presets for DICOM files
+        selected_window = "Auto / Default DICOM"
+        if is_dcm:
+            selected_window = st.selectbox(
+                "🎛️ Hounsfield Unit (HU) Window Preset",
+                list(WINDOW_PRESETS.keys()),
+                index=0
+            )
 
         modality_override = st.selectbox(
             "Modality Protocol",
@@ -98,51 +105,65 @@ with tab_diag:
         )
 
         if uploaded_file is not None:
-            raw_img = Image.open(uploaded_file).convert("RGB")
+            file_bytes = uploaded_file.getvalue()
 
             if st.button("🔍 Execute Agentic Analysis", type="primary", use_container_width=True):
-                with st.spinner("Extracting hierarchical BiomedCLIP ensembles & generating visual attention heatmap..."):
-                    # 1. Two-Tier Zero-Shot Feature Extraction & Saliency Overlay
-                    telemetry, heatmap_overlay = cv_extractor.extract_features(raw_img)
-                    
+                with st.spinner("Decoding image/DICOM buffer, applying HU windowing & running BiomedCLIP..."):
+                    telemetry, heatmap_overlay, rgb_img = cv_extractor.extract_features(
+                        file_bytes,
+                        window_preset=selected_window
+                    )
+
                     if modality_override != "Auto-Detect (Hierarchical BiomedCLIP)":
                         telemetry["standard_modality"] = modality_override
 
                     st.session_state.cv_telemetry = telemetry
                     st.session_state.heatmap_image = heatmap_overlay
+                    st.session_state.rendered_rgb = rgb_img
 
-                    # 2. Multi-Agent Reasoning via LangGraph
+                    # LangGraph multi-agent execution
                     report = st.session_state.engine.invoke_with_memory(
                         user_query=f"Perform radiological evaluation on {telemetry['standard_modality']}.",
                         thread_id=st.session_state.thread_id,
                         extra_meta={"telemetry": telemetry}
                     )
 
-                    # 3. Update State
                     st.session_state.current_report = report
                     st.session_state.scan_count += 1
                     st.session_state.messages.append({"role": "assistant", "content": report})
                     st.rerun()
 
-            # Dual-Panel Visual Comparison: Original Scan vs AI Attention Heatmap
-            if st.session_state.heatmap_image is not None:
+            # Side-by-Side Visual Comparison
+            if st.session_state.heatmap_image is not None and st.session_state.rendered_rgb is not None:
                 img_col1, img_col2 = st.columns(2)
                 with img_col1:
-                    st.image(raw_img, caption="Original Medical Scan", use_container_width=True)
+                    caption_text = f"Scan (Window: {selected_window})" if is_dcm else "Original Scan"
+                    st.image(st.session_state.rendered_rgb, caption=caption_text, use_container_width=True)
                 with img_col2:
                     st.image(st.session_state.heatmap_image, caption="AI Attention Saliency Overlay", use_container_width=True)
-            else:
-                st.image(raw_img, caption="Active Patient Scan", use_container_width=True)
+            elif not is_dcm and uploaded_file is not None:
+                st.image(Image.open(uploaded_file).convert("RGB"), caption="Active Patient Scan", use_container_width=True)
+
+            # Display PACS DICOM Header Metadata
+            if st.session_state.cv_telemetry and st.session_state.cv_telemetry.get("dicom_metadata", {}).get("is_dicom"):
+                d_meta = st.session_state.cv_telemetry["dicom_metadata"]
+                with st.expander("🏷️ DICOM PACS Metadata Headers", expanded=False):
+                    c1, c2 = st.columns(2)
+                    c1.markdown(f"**Modality:** `{d_meta.get('modality')}`")
+                    c1.markdown(f"**Body Part:** `{d_meta.get('body_part')}`")
+                    c1.markdown(f"**Patient Age/Sex:** `{d_meta.get('patient_age')}` / `{d_meta.get('patient_sex')}`")
+                    c2.markdown(f"**KVP:** `{d_meta.get('kvp')}`")
+                    c2.markdown(f"**Exposure:** `{d_meta.get('exposure_time')}`")
+                    c2.markdown(f"**Photometric:** `{d_meta.get('photometric_interpretation')}`")
 
             # Diagnostic Consultation Findings & PDF Download
             if st.session_state.current_report and st.session_state.cv_telemetry:
                 st.divider()
                 st.success("✅ Diagnostic Consultation Ready")
-                
+
                 top_f = st.session_state.cv_telemetry["primary_finding"]
                 comp = st.session_state.cv_telemetry.get("anatomical_compartment", "Bone")
-                
-                # Phase 1 Subtitle Displaying Hierarchical Triage
+
                 st.caption(
                     f"🔬 **Tier-1 Triage:** `{comp}` ({st.session_state.cv_telemetry['modality_confidence']}% confidence) "
                     f"| **Tier-2 Finding:** `{top_f['finding']}` ({top_f['confidence']}%)"
@@ -152,14 +173,14 @@ with tab_diag:
                     st.markdown(st.session_state.current_report)
 
                 # PDF Export Button
-                if st.session_state.heatmap_image is not None:
+                if st.session_state.heatmap_image is not None and st.session_state.rendered_rgb is not None:
                     pdf_bytes = build_clinical_pdf(
                         thread_id=st.session_state.thread_id,
                         modality=st.session_state.cv_telemetry["standard_modality"],
                         primary_finding=top_f["finding"],
                         confidence=top_f["confidence"],
                         report_markdown=st.session_state.current_report,
-                        original_img=raw_img,
+                        original_img=st.session_state.rendered_rgb,
                         heatmap_img=st.session_state.heatmap_image
                     )
 
@@ -184,7 +205,7 @@ with tab_diag:
                     with st.chat_message(msg["role"]):
                         st.markdown(msg["content"])
 
-            if prompt := st.chat_input("Ask a question about this diagnosis or treatment options..."):
+            if prompt := st.chat_input("Ask a question about this diagnosis, treatment, or guidelines..."):
                 st.session_state.messages.append({"role": "user", "content": prompt})
 
                 with st.spinner("Specialist reviewing context..."):
@@ -196,9 +217,9 @@ with tab_diag:
 
                 st.rerun()
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # TAB 2: DOSSIER & SESSION STATE
-# =============================================================================
+# -----------------------------------------------------------------------------
 with tab_dossier:
     st.subheader("📁 Patient Historical Records")
 
