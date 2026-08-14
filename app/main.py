@@ -1,5 +1,5 @@
 """
-FastAPI In-Memory Streaming Entrypoint.
+FastAPI In-Memory Streaming Entrypoint with DICOM & Standard Image Ingestion.
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
@@ -12,18 +12,28 @@ engine = MedicalGraphEngine()
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "model": "BiomedCLIP + LLaMA 3.3 70B via LangGraph"}
+    return {"status": "online", "model": "BiomedCLIP + LLaMA 3.3 70B via LangGraph (DICOM Supported)"}
 
 
 @app.post("/analyze")
-async def analyze_scan(file: UploadFile = File(...), thread_id: str = "default-session"):
-    """Streams image bytes in-memory to prevent disk I/O bottlenecks."""
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Uploaded file must be an image (PNG, JPG, JPEG).")
+async def analyze_scan(
+    file: UploadFile = File(...),
+    window_preset: str = "Auto / Default DICOM",
+    thread_id: str = "default-session"
+):
+    """Streams DICOM or standard image bytes in-memory for zero disk I/O latency."""
+    filename = file.filename.lower()
+    valid_extensions = (".dcm", ".png", ".jpg", ".jpeg")
+    
+    if not any(filename.endswith(ext) for ext in valid_extensions) and not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file must be a DICOM (.dcm) or standard image (PNG, JPG, JPEG)."
+        )
 
     try:
-        image_bytes = await file.read()
-        telemetry, _ = cv_extractor.extract_features(image_bytes)
+        file_bytes = await file.read()
+        telemetry, _, _ = cv_extractor.extract_features(file_bytes, window_preset=window_preset)
 
         report_markdown = engine.invoke_with_memory(
             user_query=f"Analyze uploaded scan with modality: {telemetry['standard_modality']}",
