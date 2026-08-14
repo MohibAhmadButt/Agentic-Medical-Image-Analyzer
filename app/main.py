@@ -1,32 +1,45 @@
-from fastapi import FastAPI, File, UploadFile
-import shutil
-import os
-from app.agent.medical_agent import AgenticWorkflow
+"""
+Production-Grade FastAPI In-Memory Streaming Entrypoint.
+"""
 
-app = FastAPI(title="Agentic Medical Image Analyzer")
-os.makedirs("uploads", exist_ok=True)
+import io
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from app.cv.feature_extractor import cv_extractor
+from app.agent.graph_engine import MedicalGraphEngine
 
-# Boot up our autonomous agent
-print("Booting up Agentic Workflow...")
-medical_agent = AgenticWorkflow()
-print("Agent Ready! 🤖")
+app = FastAPI(title="Agentic Medical Image Analyzer API", version="2.0")
+engine = MedicalGraphEngine()
+
 
 @app.get("/")
-def read_root():
-    return {"message": "Agentic Server is running!"}
+def health_check():
+    return {"status": "online", "model": "BiomedCLIP + LLaMA 3.3 70B via LangGraph"}
+
 
 @app.post("/analyze")
-async def analyze_image(file: UploadFile = File(...)):
-    # 1. Save the file
-    file_path = f"uploads/{file.filename}"
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+async def analyze_scan(file: UploadFile = File(...), thread_id: str = "default-session"):
+    """Streams image bytes directly in-memory to prevent disk I/O bottlenecks."""
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image (PNG, JPG, JPEG).")
+
+    try:
+        # Read file bytes in memory
+        image_bytes = await file.read()
         
-    # 2. Hand the file path to the Agent and let it do EVERYTHING else!
-    final_report = medical_agent.run(file_path)
-    
-    # 3. Return the agent's report
-    return {
-        "filename": file.filename,
-        "agent_report": final_report
-    }
+        # 1. Run zero-shot BiomedCLIP analysis
+        telemetry = cv_extractor.extract_features(image_bytes)
+
+        # 2. Invoke LangGraph multi-agent pipeline
+        report_markdown = engine.invoke_with_memory(
+            user_query=f"Analyze uploaded scan with modality: {telemetry['standard_modality']}",
+            thread_id=thread_id,
+            extra_meta={"telemetry": telemetry}
+        )
+
+        return {
+            "filename": file.filename,
+            "telemetry": telemetry,
+            "clinical_report": report_markdown
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis pipeline error: {str(e)}")
