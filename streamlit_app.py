@@ -3,13 +3,18 @@ import os
 import uuid
 from PIL import Image
 
-# Bridge Streamlit Secrets
+# -----------------------------------------------------------------------------
+# BRIDGE STREAMLIT SECRETS TO OS ENVIRONMENT
+# -----------------------------------------------------------------------------
 if "GROQ_API_KEY" in st.secrets and not os.environ.get("GROQ_API_KEY"):
     os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 
 from app.agent.graph_engine import MedicalGraphEngine
 from app.cv.feature_extractor import cv_extractor
 
+# -----------------------------------------------------------------------------
+# PAGE SETUP & RESOURCE CACHING
+# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Multi-Agent Medical Image Analyzer",
     page_icon="🏥",
@@ -38,6 +43,9 @@ if "current_report" not in st.session_state:
 if "cv_telemetry" not in st.session_state:
     st.session_state.cv_telemetry = None
 
+if "heatmap_image" not in st.session_state:
+    st.session_state.heatmap_image = None
+
 if "engine" not in st.session_state:
     st.session_state.engine = get_engine()
 
@@ -48,19 +56,24 @@ def reset_session():
     st.session_state.scan_count = 0
     st.session_state.current_report = None
     st.session_state.cv_telemetry = None
+    st.session_state.heatmap_image = None
     st.rerun()
 
 
+# -----------------------------------------------------------------------------
+# UI LAYOUT
+# -----------------------------------------------------------------------------
 st.title("🏥 Multi-Agent Medical Image Analyzer")
 
 tab_diag, tab_dossier = st.tabs(["🩺 Diagnostics & Chat", "📁 Patient Dossier"])
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # TAB 1: DIAGNOSTICS & CHAT
-# -----------------------------------------------------------------------------
+# =============================================================================
 with tab_diag:
     col_left, col_right = st.columns([1, 1], gap="large")
 
+    # --- LEFT COLUMN: SCAN UPLOAD & VISUAL LOCALIZATION ---
     with col_left:
         st.subheader("📤 Scan Upload & Triage")
         uploaded_file = st.file_uploader(
@@ -74,21 +87,21 @@ with tab_diag:
         )
 
         if uploaded_file is not None:
-            image = Image.open(uploaded_file).convert("RGB")
-            st.image(image, caption="Active Scan", use_container_width=True)
+            raw_img = Image.open(uploaded_file).convert("RGB")
 
+            # Execute Analysis Button
             if st.button("🔍 Execute Agentic Analysis", type="primary", use_container_width=True):
-                with st.spinner("Extracting zero-shot BiomedCLIP features & synthesizing report..."):
-                    # In-memory feature extraction
-                    img_bytes = uploaded_file.getvalue()
-                    telemetry = cv_extractor.extract_features(img_bytes)
+                with st.spinner("Extracting zero-shot BiomedCLIP features & generating attention heatmap..."):
+                    # 1. Feature Extraction & Visual Saliency
+                    telemetry, heatmap_overlay = cv_extractor.extract_features(raw_img)
                     
                     if modality_override != "Auto-Detect (BiomedCLIP)":
                         telemetry["standard_modality"] = modality_override
 
                     st.session_state.cv_telemetry = telemetry
+                    st.session_state.heatmap_image = heatmap_overlay
 
-                    # LangGraph multi-agent execution
+                    # 2. Multi-Agent Reasoning via LangGraph
                     report = st.session_state.engine.invoke_with_memory(
                         user_query=f"Perform radiological evaluation on {telemetry['standard_modality']}.",
                         thread_id=st.session_state.thread_id,
@@ -100,6 +113,17 @@ with tab_diag:
                     st.session_state.messages.append({"role": "assistant", "content": report})
                     st.rerun()
 
+            # Side-by-Side Visual Inspection (Original vs Heatmap)
+            if st.session_state.heatmap_image is not None:
+                img_col1, img_col2 = st.columns(2)
+                with img_col1:
+                    st.image(raw_img, caption="Original Scan", use_container_width=True)
+                with img_col2:
+                    st.image(st.session_state.heatmap_image, caption="AI Attention Heatmap Overlay", use_container_width=True)
+            else:
+                st.image(raw_img, caption="Active Patient Scan", use_container_width=True)
+
+            # Diagnostic Report Display
             if st.session_state.current_report:
                 st.divider()
                 st.success("✅ Diagnostic Consultation Ready")
@@ -111,6 +135,7 @@ with tab_diag:
                 with st.expander("📄 View Official Specialist Report", expanded=True):
                     st.markdown(st.session_state.current_report)
 
+    # --- RIGHT COLUMN: INTERACTIVE SPECIALIST Q&A ---
     with col_right:
         st.subheader("💬 Interactive Specialist Q&A")
 
@@ -135,9 +160,9 @@ with tab_diag:
 
                 st.rerun()
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # TAB 2: DOSSIER & SESSION STATE
-# -----------------------------------------------------------------------------
+# =============================================================================
 with tab_dossier:
     st.subheader("📁 Patient Historical Records")
 
