@@ -1,6 +1,6 @@
 """
-LangGraph Multi-Agent Medical State Engine with Stateful Memory.
-Routes BiomedCLIP vision telemetry through specialized radiology protocols using LLaMA 3.3 70B.
+LangGraph Multi-Agent Medical State Engine with ACR Guideline RAG.
+Orchestrates Triage, Specialist Evaluation, and Interactive Q&A with MemorySaver state persistence.
 """
 
 import os
@@ -14,10 +14,11 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from app.llm.report_generator import ClinicalReportSynthesizer, MedicalReport
+from app.rag.guideline_engine import guideline_retriever
 
 load_dotenv()
 
-# Specialized Protocols
+# Specialized Clinical Evaluation Protocols
 SPECIALIST_PROTOCOLS = {
     "Bone Radiograph / X-Ray": {
         "technique": "Trace cortical bone contours, inspect Shenton's line, joint alignment, and trabeculae.",
@@ -43,7 +44,7 @@ SPECIALIST_PROTOCOLS = {
 
 
 def merge_metadata(current: dict, update: dict) -> dict:
-    """Safely merges metadata so follow-up chat messages never overwrite prior diagnostic data."""
+    """Safely merges metadata across agent transitions and chat turns."""
     if current is None:
         return update if update is not None else {}
     if update is None:
@@ -85,6 +86,7 @@ class MedicalGraphEngine:
         return workflow.compile(checkpointer=self.memory)
 
     def _router(self, state: ClinicalAgentState) -> str:
+        """Routes initial uploads to triage, and follow-up user inquiries to QA."""
         if state.get("session_metadata", {}).get("report_generated", False):
             return "qa_agent"
         return "triage_agent"
@@ -99,18 +101,25 @@ class MedicalGraphEngine:
         protocol = SPECIALIST_PROTOCOLS.get(modality, SPECIALIST_PROTOCOLS["Bone Radiograph / X-Ray"])
         telemetry = state.get("session_metadata", {}).get("telemetry", {})
 
+        # Retrieve ACR Clinical Guideline
+        compartment = telemetry.get("anatomical_compartment", "Pelvis & Hip")
+        primary_finding = telemetry.get("primary_finding", {}).get("finding", "Fracture")
+        guideline = guideline_retriever.retrieve(compartment, primary_finding)
+
         report: MedicalReport = self.synthesizer.generate(
             modality=modality,
             telemetry=telemetry,
+            guideline=guideline,
             protocol=protocol
         )
 
         formatted_markdown = (
             f"### 📋 Primary Diagnostic Impression\n{report.primary_impression}\n\n"
+            f"### 📖 Clinical Practice Standard\n*{report.guideline_citation}*\n\n"
             f"### 🔬 Key Findings & Localization\n" + "\n".join([f"- {f}" for f in report.key_findings]) + "\n\n"
             f"### 📊 Differential Diagnoses\n" + "\n".join([f"- {d}" for d in report.differential_diagnosis]) + "\n\n"
             f"### ⚠️ Urgency Level\n**{report.urgency_level}** (Confidence: {report.confidence_score}%)\n\n"
-            f"### 💡 Clinical Recommendations\n" + "\n".join([f"- {r}" for r in report.recommendations]) + "\n\n"
+            f"### 💡 Evidence-Grounded Recommendations\n" + "\n".join([f"- {r}" for r in report.recommendations]) + "\n\n"
             f"---\n*{report.disclaimer}*"
         )
 
@@ -119,6 +128,7 @@ class MedicalGraphEngine:
             "session_metadata": {
                 "report_structured": report.model_dump(),
                 "report_markdown": formatted_markdown,
+                "guideline": guideline,
                 "report_generated": True
             }
         }
@@ -130,12 +140,14 @@ class MedicalGraphEngine:
 
         report_md = state.get("session_metadata", {}).get("report_markdown", "No report available.")
         modality = state.get("session_metadata", {}).get("active_modality", "Medical Scan")
+        guideline_meta = state.get("session_metadata", {}).get("guideline", {})
 
         system_prompt = (
             f"You are a clinical advisory specialist discussing an analyzed {modality}.\n"
             f"REPORT IN CONTEXT:\n{report_md}\n\n"
+            f"CLINICAL GUIDELINE IN CONTEXT:\n{str(guideline_meta)}\n\n"
             f"INSTRUCTIONS:\n"
-            f"1. Answer follow-up questions accurately and concisely based strictly on the report findings above.\n"
+            f"1. Answer follow-up questions accurately and concisely based strictly on the report findings and clinical practice guidelines above.\n"
             f"2. Explain surgical interventions, non-weight-bearing protocols, or imaging steps if asked.\n"
             f"3. Strictly obey user formatting constraints."
         )
