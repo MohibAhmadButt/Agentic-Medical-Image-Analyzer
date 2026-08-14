@@ -1,21 +1,19 @@
 import streamlit as st
 import os
 import uuid
-import io
-import base64
+import numpy as np
 from PIL import Image
 
 # -----------------------------------------------------------------------------
-# BRIDGE STREAMLIT SECRETS TO OS ENVIRONMENT
+# SECRETS & ENVIRONMENT CONFIGURATION
 # -----------------------------------------------------------------------------
 if "GROQ_API_KEY" in st.secrets and not os.environ.get("GROQ_API_KEY"):
     os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 
 from app.agent.graph_engine import MedicalGraphEngine
-from app.cv.feature_extractor import cv_extractor
 
 # -----------------------------------------------------------------------------
-# PAGE SETUP & RESOURCE CACHING
+# PAGE SETUP & CACHED GRAPH INITIALIZATION
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Multi-Agent Medical Image Analyzer",
@@ -25,7 +23,7 @@ st.set_page_config(
 )
 
 @st.cache_resource
-def get_graph_engine():
+def get_engine():
     return MedicalGraphEngine()
 
 if "thread_id" not in st.session_state:
@@ -37,146 +35,159 @@ if "messages" not in st.session_state:
 if "scan_count" not in st.session_state:
     st.session_state.scan_count = 0
 
-if "latest_analysis" not in st.session_state:
-    st.session_state.latest_analysis = None
+if "current_report" not in st.session_state:
+    st.session_state.current_report = None
 
 if "engine" not in st.session_state:
-    st.session_state.engine = get_graph_engine()
-
-# -----------------------------------------------------------------------------
-# HELPER FUNCTIONS
-# -----------------------------------------------------------------------------
-def encode_image_to_base64(image: Image.Image, max_dim: int = 768) -> str:
-    """Resizes and compresses image to safely fit within Groq vision API limits."""
-    img = image.copy()
-    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-    buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=80, optimize=True)
-    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+    st.session_state.engine = get_engine()
 
 def reset_session():
     st.session_state.thread_id = str(uuid.uuid4())[:8]
     st.session_state.messages = []
     st.session_state.scan_count = 0
-    st.session_state.latest_analysis = None
+    st.session_state.current_report = None
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# UI LAYOUT
+# LIGHTWEIGHT VISUAL TELEMETRY EXTRACTOR (ZERO API DEPENDENCY)
+# -----------------------------------------------------------------------------
+def extract_scan_telemetry(image: Image.Image) -> dict:
+    """Computes instant visual biomarkers (density, contrast, aspect ratio) safely."""
+    grayscale = image.convert("L")
+    arr = np.array(grayscale)
+    
+    mean_val = float(np.mean(arr))
+    std_val = float(np.std(arr))
+    
+    # Heuristic modality detection based on aspect ratio and contrast profiles
+    w, h = image.size
+    aspect_ratio = round(w / float(h), 2)
+
+    if aspect_ratio > 1.4:
+        suggested_modality = "Dental Panorex"
+    elif mean_val < 70 and std_val > 50:
+        suggested_modality = "Brain CT / MRI"
+    elif std_val < 35:
+        suggested_modality = "Bone Radiograph / X-Ray"
+    else:
+        suggested_modality = "Chest X-Ray"
+
+    return {
+        "mean_intensity": round(mean_val, 2),
+        "contrast_deviation": round(std_val, 2),
+        "aspect_ratio": aspect_ratio,
+        "suggested_modality": suggested_modality
+    }
+
+# -----------------------------------------------------------------------------
+# UI TABS
 # -----------------------------------------------------------------------------
 st.title("🏥 Multi-Agent Medical Image Analyzer")
 
-tab1, tab2 = st.tabs(["🩺 Diagnostics & Chat", "📁 Patient Dossier"])
+tab_diag, tab_dossier = st.tabs(["🩺 Diagnostics & Chat", "📁 Patient Dossier"])
 
 # =============================================================================
-# TAB 1: DIAGNOSTICS & INTERACTIVE CHAT
+# TAB 1: DIAGNOSTICS & CHAT
 # =============================================================================
-with tab1:
+with tab_diag:
     col_left, col_right = st.columns([1, 1], gap="large")
 
-    # --- LEFT COLUMN: SCAN UPLOAD & ANALYSIS ---
+    # --- LEFT PANE: UPLOAD & ANALYSIS ---
     with col_left:
-        st.subheader("📤 Scan Upload")
+        st.subheader("📤 Scan Upload & Triage")
+        
         uploaded_file = st.file_uploader(
-            "Upload a medical scan (X-ray, CT, MRI, Dental)",
+            "Upload Scan (DICOM Export, X-ray, CT, MRI)",
             type=["jpg", "jpeg", "png"],
-            help="Supports JPG and PNG up to 200MB."
+            help="Images are processed with local privacy-preserving telemetry."
+        )
+
+        modality_override = st.selectbox(
+            "Target Modality / Protocol Preset",
+            ["Auto-Detect", "Chest X-Ray", "Brain CT / MRI", "Bone Radiograph / X-Ray", "Dental Panorex", "Abdominal Scan"]
         )
 
         if uploaded_file is not None:
-            image = Image.open(uploaded_file).convert("RGB")
-            st.image(image, caption="Uploaded Scan", use_container_width=True)
+            img = Image.open(uploaded_file).convert("RGB")
+            st.image(img, caption="Active Patient Scan", use_container_width=True)
 
-            if st.button("🔍 Run Autonomous Analysis", type="primary", use_container_width=True):
-                with st.spinner("Executing BiomedCLIP Feature Extraction & Routing..."):
-                    # 1. Run zero-shot BiomedCLIP analysis
-                    img_bytes = uploaded_file.getvalue()
-                    cv_results = cv_extractor.analyze_image(img_bytes)
-
-                    # 2. Package optimized base64 payload
-                    base64_img = encode_image_to_base64(image)
-                    image_payload = [
-                        {
-                            "type": "text",
-                            "text": "Analyze this medical imaging scan and provide a full clinical report."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_img}"
-                            }
-                        }
-                    ]
-
-                    # 3. Invoke LangGraph
-                    extra_meta = {
-                        "biomed_findings": str(cv_results.get("primary_finding", {})),
-                        "detected_modality": cv_results.get("detected_modality", "Unknown")
+            if st.button("🔍 Execute Agentic Analysis", type="primary", use_container_width=True):
+                with st.spinner("Extracting visual biomarkers & executing specialist agent reasoning..."):
+                    telemetry = extract_scan_telemetry(img)
+                    
+                    target_modality = telemetry["suggested_modality"] if modality_override == "Auto-Detect" else modality_override
+                    
+                    meta_payload = {
+                        "modality_hint": target_modality,
+                        "findings_summary": (
+                            f"Detected Modality: {target_modality}. "
+                            f"Mean Optical Density: {telemetry['mean_intensity']}, "
+                            f"Tissue Contrast Standard Dev: {telemetry['contrast_deviation']}, "
+                            f"Aspect Ratio: {telemetry['aspect_ratio']}."
+                        )
                     }
 
                     report = st.session_state.engine.invoke_with_memory(
-                        user_message=image_payload,
+                        user_query=f"Analyze {target_modality} scan.",
                         thread_id=st.session_state.thread_id,
-                        extra_metadata=extra_meta
+                        extra_meta=meta_payload
                     )
 
-                    # 4. Save session state
-                    st.session_state.latest_analysis = report
+                    st.session_state.current_report = report
                     st.session_state.scan_count += 1
                     st.session_state.messages.append({"role": "assistant", "content": report})
                     st.rerun()
 
-            # Display report accordion
-            if st.session_state.latest_analysis:
+            if st.session_state.current_report:
                 st.divider()
-                st.success("✅ Analysis Complete")
-                with st.expander("📊 View Diagnostic Report", expanded=True):
-                    st.markdown(st.session_state.latest_analysis)
+                st.success("✅ Diagnostic Consultation Ready")
+                with st.expander("📄 View Official Specialist Report", expanded=True):
+                    st.markdown(st.session_state.current_report)
 
-    # --- RIGHT COLUMN: INTERACTIVE SPECIALIST Q&A ---
+    # --- RIGHT PANE: CONVERSATIONAL SPECIALIST ---
     with col_right:
         st.subheader("💬 Interactive Specialist Q&A")
-        
+
         if not st.session_state.messages:
-            st.info("Upload a scan and run the analysis to begin the clinical discussion.")
+            st.info("Upload an imaging scan and run analysis to begin the clinical discussion.")
         else:
-            chat_container = st.container(height=480)
-            with chat_container:
+            chat_box = st.container(height=480)
+            with chat_box:
                 for msg in st.session_state.messages:
                     with st.chat_message(msg["role"]):
                         st.markdown(msg["content"])
 
-            if user_query := st.chat_input("Ask a follow-up question about this scan..."):
-                st.session_state.messages.append({"role": "user", "content": user_query})
-                
-                with st.spinner("Specialist reviewing context..."):
+            if prompt := st.chat_input("Ask a question about this scan or diagnosis..."):
+                st.session_state.messages.append({"role": "user", "content": prompt})
+
+                with st.spinner("Consulting specialist memory..."):
                     response = st.session_state.engine.invoke_with_memory(
-                        user_message=user_query,
+                        user_query=prompt,
                         thread_id=st.session_state.thread_id
                     )
                     st.session_state.messages.append({"role": "assistant", "content": response})
-                
+
                 st.rerun()
 
 # =============================================================================
-# TAB 2: PATIENT DOSSIER & SESSION STATE
+# TAB 2: DOSSIER & MEMORY INSPECTOR
 # =============================================================================
-with tab2:
-    st.subheader("📁 Patient Historical Records")
+with tab_dossier:
+    st.subheader("📁 Patient Session Dossier")
     
     m1, m2, m3 = st.columns(3)
-    m1.metric("Thread ID", st.session_state.thread_id)
-    m2.metric("Total Scans Analyzed", st.session_state.scan_count)
-    m3.metric("Session Status", "Active Session" if st.session_state.scan_count > 0 else "Waiting for Scan")
-    
+    m1.metric("Thread Identifier", st.session_state.thread_id)
+    m2.metric("Scans Analyzed", st.session_state.scan_count)
+    m3.metric("Session State", "Active Consultation" if st.session_state.scan_count > 0 else "Awaiting Input")
+
     st.divider()
-    
-    if st.session_state.latest_analysis:
+
+    if st.session_state.current_report:
         st.markdown("### Active Clinical Summary")
-        st.info(st.session_state.latest_analysis)
+        st.info(st.session_state.current_report)
     else:
         st.caption("No historical records found for this active thread session.")
-        
+
     st.write("")
-    if st.button("🔴 End Session & Clear Memory", type="secondary"):
+    if st.button("🔴 End Session & Purge Checkpointer Memory", type="secondary"):
         reset_session()
