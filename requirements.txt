@@ -5,6 +5,7 @@ python-multipart
 torch
 torchvision
 Pillow
+numpy
 open_clip_torch
 transformers
 huggingface_hub
@@ -16,3 +17,4 @@ pydantic
 python-dotenv
 typing-extensions
 fpdf2
+pydicom
