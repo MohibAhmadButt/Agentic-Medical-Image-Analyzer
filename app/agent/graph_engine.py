@@ -1,5 +1,6 @@
 """
-LangGraph Multi-Agent Medical State Engine.
+LangGraph Multi-Agent Medical State Engine with Stateful Memory.
+Routes BiomedCLIP vision telemetry through specialized radiology protocols using LLaMA 3.3 70B.
 """
 
 import os
@@ -42,6 +43,7 @@ SPECIALIST_PROTOCOLS = {
 
 
 def merge_metadata(current: dict, update: dict) -> dict:
+    """Safely merges metadata so follow-up chat messages never overwrite prior diagnostic data."""
     if current is None:
         return update if update is not None else {}
     if update is None:
