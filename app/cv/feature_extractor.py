@@ -1,5 +1,6 @@
+"""BiomedCLIP Feature Extractor for Zero-Shot Medical Vision Triage."""
+
 import io
-import os
 from typing import Dict, List, Union
 import open_clip
 from PIL import Image
@@ -15,7 +16,7 @@ class BiomedFeatureExtractor:
         else ("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    # Load Microsoft BiomedCLIP
+    # Load Microsoft BiomedCLIP from Hugging Face Hub
     self.model, _, self.preprocess = open_clip.create_model_and_transforms(
         "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
     )
@@ -25,7 +26,6 @@ class BiomedFeatureExtractor:
     self.model.to(self.device)
     self.model.eval()
 
-    # Pre-defined clinical taxonomy
     self.modalities = [
         "chest x-ray",
         "brain mri",
@@ -61,12 +61,12 @@ class BiomedFeatureExtractor:
     image = self._load_image(image_input)
     image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
 
-    # 1. Modality Classification
+    # Modality Classification
     modality_tokens = self.tokenizer(
         [f"a medical image of {m}" for m in self.modalities]
     ).to(self.device)
 
-    # 2. Pathology Classification
+    # Pathology Classification
     labels_to_test = custom_labels or self.pathology_candidates
     pathology_tokens = self.tokenizer(
         [f"medical scan demonstrating {p}" for p in labels_to_test]
@@ -76,7 +76,7 @@ class BiomedFeatureExtractor:
       image_feat = self.model.encode_image(image_tensor)
       image_feat /= image_feat.norm(dim=-1, keepdim=True)
 
-      # Evaluate Modality
+      # Evaluate Modalities
       mod_feat = self.model.encode_text(modality_tokens)
       mod_feat /= mod_feat.norm(dim=-1, keepdim=True)
       mod_probs = (
@@ -108,4 +108,5 @@ class BiomedFeatureExtractor:
     }
 
 
+# Singleton instance
 cv_extractor = BiomedFeatureExtractor()
