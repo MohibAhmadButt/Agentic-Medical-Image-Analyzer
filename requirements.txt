@@ -15,3 +15,4 @@ langgraph
 pydantic
 python-dotenv
 typing-extensions
+fpdf2
