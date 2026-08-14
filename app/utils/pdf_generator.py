@@ -1,9 +1,8 @@
 """
 PDF Consultation Report Generator using fpdf2.
-Bundles clinical metrics, scans, saliency heatmaps, and diagnostic impressions into a standardized PDF.
+Renders metadata, side-by-side scans, visual attention heatmaps, and diagnostic impressions into a standardized PDF.
 """
 
-import io
 import tempfile
 from datetime import datetime
 from PIL import Image
@@ -12,7 +11,7 @@ from fpdf import FPDF
 
 class ClinicalReportPDF(FPDF):
     def header(self):
-        # Header banner
+        # Top banner
         self.set_fill_color(24, 43, 73)  # Clinical Dark Navy
         self.rect(0, 0, 210, 24, "F")
         
@@ -74,7 +73,7 @@ def build_clinical_pdf(
     pdf.cell(0, 6, f"{confidence:.1f}%", border=0, ln=True)
     pdf.ln(3)
 
-    # Visual Evidence Images (Side-by-Side)
+    # Save images to temporary files for FPDF embedding
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f_orig, \
          tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f_heat:
         
@@ -120,16 +119,21 @@ def build_clinical_pdf(
     pdf.ln(3)
 
     pdf.set_font("Helvetica", "", 8.5)
-    # Sanitize markdown bold/hash markers for plain-text formatting in PDF
+    
+    # Strip markdown syntax for clean PDF rendering
     clean_report = (
         report_markdown.replace("### ", "\n")
         .replace("## ", "\n")
         .replace("**", "")
         .replace("---", "")
+        .replace("📋 ", "")
+        .replace("🔬 ", "")
+        .replace("📊 ", "")
+        .replace("⚠️ ", "")
+        .replace("💡 ", "")
         .strip()
     )
 
     pdf.multi_cell(0, 4.5, clean_report)
 
-    # Return raw PDF bytes
     return bytes(pdf.output())
