@@ -46,12 +46,12 @@ if "engine" not in st.session_state:
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS
 # -----------------------------------------------------------------------------
-def encode_image_to_base64(image: Image.Image, max_size: tuple = (1024, 1024)) -> str:
-    """Resizes and compresses image to prevent exceeding Groq API payload limits."""
+def encode_image_to_base64(image: Image.Image, max_dim: int = 768) -> str:
+    """Resizes and compresses image to safely fit within Groq vision API limits."""
     img = image.copy()
-    img.thumbnail(max_size, Image.Resampling.LANCZOS)
+    img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
     buffered = io.BytesIO()
-    img.save(buffered, format="JPEG", quality=85)
+    img.save(buffered, format="JPEG", quality=80, optimize=True)
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
 def reset_session():
@@ -93,12 +93,12 @@ with tab1:
                     img_bytes = uploaded_file.getvalue()
                     cv_results = cv_extractor.analyze_image(img_bytes)
 
-                    # 2. Package compressed image payload for Groq Vision LLM
+                    # 2. Package optimized base64 payload
                     base64_img = encode_image_to_base64(image)
                     image_payload = [
                         {
                             "type": "text",
-                            "text": "Please perform a complete radiological triage and analysis on this scan."
+                            "text": "Analyze this medical imaging scan and provide a full clinical report."
                         },
                         {
                             "type": "image_url",
@@ -108,10 +108,10 @@ with tab1:
                         }
                     ]
 
-                    # 3. Invoke LangGraph with persistent memory
+                    # 3. Invoke LangGraph
                     extra_meta = {
-                        "biomed_findings": str(cv_results["primary_finding"]),
-                        "detected_modality": cv_results["detected_modality"]
+                        "biomed_findings": str(cv_results.get("primary_finding", {})),
+                        "detected_modality": cv_results.get("detected_modality", "Unknown")
                     }
 
                     report = st.session_state.engine.invoke_with_memory(
@@ -120,7 +120,7 @@ with tab1:
                         extra_metadata=extra_meta
                     )
 
-                    # 4. Save state
+                    # 4. Save session state
                     st.session_state.latest_analysis = report
                     st.session_state.scan_count += 1
                     st.session_state.messages.append({"role": "assistant", "content": report})
