@@ -1,6 +1,6 @@
 """
-BiomedCLIP Zero-Shot Feature Extractor
-Performs medical zero-shot classification across imaging modalities and pathologies.
+BiomedCLIP Zero-Shot Vision Backbone
+Extracts medical imaging modalities and granular pathologies in-memory without disk I/O.
 """
 
 import io
@@ -14,7 +14,7 @@ class BiomedFeatureExtractor:
     def __init__(self, device: str = None):
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Load Microsoft BiomedCLIP from Hugging Face Hub
+        # Load Microsoft BiomedCLIP from Hugging Face
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
         )
@@ -24,17 +24,17 @@ class BiomedFeatureExtractor:
         self.model.to(self.device)
         self.model.eval()
 
-        # Clinical Modalities
+        # Taxonomy: Modalities
         self.modality_labels = [
             "pelvis or hip bone radiograph x-ray",
-            "extremity or skeletal bone radiograph x-ray",
+            "skeletal extremity bone radiograph x-ray",
             "chest radiograph x-ray",
             "brain ct or mri scan",
             "dental panoramic radiograph",
             "abdominal radiograph or ct scan"
         ]
 
-        # Granular Pathologies & Findings
+        # Taxonomy: Pathologies
         self.pathology_labels = [
             "femoral neck fracture or hip bone fracture",
             "cortical bone fracture or displaced bone fragment",
@@ -48,23 +48,23 @@ class BiomedFeatureExtractor:
             "bowel obstruction or abnormal abdominal air"
         ]
 
-    def _load_image(self, image_input: Union[str, bytes, Image.Image]) -> Image.Image:
+    def _load_image_stream(self, image_input: Union[str, bytes, Image.Image]) -> Image.Image:
+        """Loads and converts image inputs in-memory."""
         if isinstance(image_input, Image.Image):
             return image_input.convert("RGB")
         if isinstance(image_input, bytes):
             return Image.open(io.BytesIO(image_input)).convert("RGB")
         return Image.open(image_input).convert("RGB")
 
-    def analyze_image(self, image_input: Union[str, bytes, Image.Image]) -> Dict:
-        image = self._load_image(image_input)
+    def extract_features(self, image_input: Union[str, bytes, Image.Image]) -> Dict:
+        """Executes zero-shot feature extraction."""
+        image = self._load_image_stream(image_input)
         image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
 
-        # 1. Modality Tokenization
         mod_tokens = self.tokenizer(
             [f"this is a medical scan showing {m}" for m in self.modality_labels]
         ).to(self.device)
 
-        # 2. Pathology Tokenization
         path_tokens = self.tokenizer(
             [f"a radiograph demonstrating {p}" for p in self.pathology_labels]
         ).to(self.device)
@@ -73,17 +73,14 @@ class BiomedFeatureExtractor:
             img_feat = self.model.encode_image(image_tensor)
             img_feat /= img_feat.norm(dim=-1, keepdim=True)
 
-            # Modality Logits
             mod_feat = self.model.encode_text(mod_tokens)
             mod_feat /= mod_feat.norm(dim=-1, keepdim=True)
             mod_probs = (100.0 * img_feat @ mod_feat.T).softmax(dim=-1).cpu().numpy()[0]
 
-            # Pathology Logits
             path_feat = self.model.encode_text(path_tokens)
             path_feat /= path_feat.norm(dim=-1, keepdim=True)
             path_probs = (100.0 * img_feat @ path_feat.T).softmax(dim=-1).cpu().numpy()[0]
 
-        # Standardize Modality Mapping
         top_mod_idx = int(mod_probs.argmax())
         raw_modality = self.modality_labels[top_mod_idx]
 
@@ -109,12 +106,11 @@ class BiomedFeatureExtractor:
 
         return {
             "standard_modality": standard_modality,
-            "raw_detected_modality": raw_modality,
             "modality_confidence": round(float(mod_probs.max()) * 100, 2),
             "primary_finding": ranked_pathologies[0],
             "differential_findings": ranked_pathologies[1:4]
         }
 
 
-# Singleton instance for tool and UI usage
+# Global singleton instance
 cv_extractor = BiomedFeatureExtractor()
