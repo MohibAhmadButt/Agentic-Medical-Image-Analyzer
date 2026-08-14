@@ -1,5 +1,6 @@
 """
-Clinical Report Generator with Pydantic Validation & ACR Guideline Grounding.
+Clinical Report Generator with Pydantic Schema Validation & Evidence Grounding.
+Uses LLaMA 3.3 70B via Groq to synthesize structured diagnostic reports.
 """
 
 import os
@@ -10,16 +11,16 @@ from langchain_core.prompts import ChatPromptTemplate
 
 
 class MedicalReport(BaseModel):
-    modality: str = Field(description="e.g., Bone Radiograph / X-Ray, Chest X-Ray, Brain CT")
+    modality: str = Field(description="Target imaging modality (e.g., Bone Radiograph / X-Ray, Chest X-Ray)")
     primary_impression: str = Field(description="Definitive diagnostic statement of primary finding")
-    guideline_citation: str = Field(description="Exact clinical practice guideline cited, e.g., ACR Appropriateness Criteria")
-    key_findings: List[str] = Field(description="Bullet list of anatomical observations and visual markers")
+    guideline_citation: str = Field(description="Official practice guideline cited (e.g., ACR Appropriateness Criteria)")
+    key_findings: List[str] = Field(description="Bullet list of anatomical observations, fractures, and visual markers")
     differential_diagnosis: List[str] = Field(description="Ranked list of alternative clinical possibilities")
     confidence_score: float = Field(description="BiomedCLIP classification confidence percentage")
     urgency_level: Literal["Routine", "Expedited", "Immediate / Emergency"] = Field(
         description="Clinical triage urgency level"
     )
-    recommendations: List[str] = Field(description="Actionable next steps and follow-ups grounded strictly in the guideline")
+    recommendations: List[str] = Field(description="Actionable management steps and follow-ups grounded strictly in the guideline")
     disclaimer: str = Field(
         default="AI clinical decision-support utility. Requires verification by a certified medical specialist.",
         description="Mandatory medical legal disclaimer"
@@ -40,9 +41,10 @@ class ClinicalReportSynthesizer:
                 "system",
                 (
                     "You are a Senior Radiologist and Clinical Decision Support AI.\n"
-                    "Analyze the provided zero-shot BiomedCLIP vision telemetry and the retrieved CLINICAL PRACTICE GUIDELINE.\n"
-                    "Synthesize a strict, structured medical report following the provided schema.\n"
-                    "Ensure recommendations and next steps are grounded explicitly in the retrieved clinical consensus rules."
+                    "Analyze the provided zero-shot BiomedCLIP vision telemetry, the retrieved CLINICAL PRACTICE GUIDELINE, "
+                    "and the anatomical checklist.\n"
+                    "Synthesize a strict, structured medical report adhering to the provided schema.\n"
+                    "Ensure clinical accuracy regarding anatomical landmarks, displacement, urgency, and cited management protocols."
                 )
             ),
             (
@@ -50,9 +52,9 @@ class ClinicalReportSynthesizer:
                 (
                     "Imaging Modality: {modality}\n"
                     "BiomedCLIP Telemetry: {telemetry}\n"
-                    "Retrieved ACR Guideline & Protocols: {guideline}\n"
-                    "Clinical Checklist: {protocol}\n\n"
-                    "Generate the structured, guideline-grounded medical evaluation."
+                    "Retrieved Practice Guideline: {guideline}\n"
+                    "Clinical Evaluation Checklist: {protocol}\n\n"
+                    "Generate the structured, guideline-grounded medical report."
                 )
             )
         ])
