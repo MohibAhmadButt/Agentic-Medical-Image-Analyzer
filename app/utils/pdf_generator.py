@@ -1,17 +1,56 @@
 """
 PDF Consultation Report Generator using fpdf2.
-Renders metadata, side-by-side scans, visual attention heatmaps, and diagnostic impressions into a standardized PDF.
+Includes complete Unicode/Latin-1 text sanitization to eliminate encoding errors.
 """
 
 import tempfile
+import unicodedata
 from datetime import datetime
 from PIL import Image
 from fpdf import FPDF
 
 
+def sanitize_text_for_pdf(text: str) -> str:
+    """
+    Sanitizes UTF-8 text containing smart quotes, dashes, bullets, and emojis
+    into clean, standard Latin-1 text compatible with core FPDF fonts.
+    """
+    if not text:
+        return ""
+
+    # Common Unicode character replacements
+    replacements = {
+        "\u2018": "'",   # Left single quote
+        "\u2019": "'",   # Right single quote / apostrophe
+        "\u201c": '"',   # Left double quote
+        "\u201d": '"',   # Right double quote
+        "\u2014": " - ", # Em dash
+        "\u2013": " - ", # En dash
+        "\u2022": "-",   # Bullet point
+        "\u2026": "...", # Ellipsis
+        "\u00a0": " ",   # Non-breaking space
+        "\u2264": "<=",  # Less than or equal
+        "\u2265": ">=",  # Greater than or equal
+        "\u00b1": "+/-", # Plus-minus
+        "\u00b0": " deg",# Degree symbol
+        "\u2192": "->",  # Right arrow
+        "\u2190": "<-",  # Left arrow
+    }
+
+    for uni_char, ascii_char in replacements.items():
+        text = text.replace(uni_char, ascii_char)
+
+    # Normalize unicode characters (NFKD)
+    normalized = unicodedata.normalize("NFKD", text)
+
+    # Encode to latin-1 and ignore any remaining unencodable symbols/emojis
+    clean_bytes = normalized.encode("latin-1", "ignore")
+    return clean_bytes.decode("latin-1")
+
+
 class ClinicalReportPDF(FPDF):
     def header(self):
-        # Top banner
+        # Header banner
         self.set_fill_color(24, 43, 73)  # Clinical Dark Navy
         self.rect(0, 0, 210, 24, "F")
         
@@ -30,7 +69,7 @@ class ClinicalReportPDF(FPDF):
             "NOTICE: This document is an AI-generated clinical consultation decision-support summary. "
             "It is not an FDA/CE cleared primary diagnostic finding and requires evaluation by a licensed physician."
         )
-        self.multi_cell(0, 3.5, disclaimer, align="C")
+        self.multi_cell(0, 3.5, sanitize_text_for_pdf(disclaimer), align="C")
         self.set_y(-8)
         self.cell(0, 4, f"Page {self.page_no()}", align="R")
 
@@ -54,7 +93,7 @@ def build_clinical_pdf(
     pdf.set_font("Helvetica", "B", 9)
     pdf.cell(40, 6, "Session Thread ID:", border=0)
     pdf.set_font("Helvetica", "", 9)
-    pdf.cell(55, 6, str(thread_id), border=0)
+    pdf.cell(55, 6, sanitize_text_for_pdf(str(thread_id)), border=0)
 
     pdf.set_font("Helvetica", "B", 9)
     pdf.cell(35, 6, "Consultation Date:", border=0)
@@ -64,7 +103,7 @@ def build_clinical_pdf(
     pdf.set_font("Helvetica", "B", 9)
     pdf.cell(40, 6, "Target Modality:", border=0)
     pdf.set_font("Helvetica", "", 9)
-    pdf.cell(55, 6, str(modality), border=0)
+    pdf.cell(55, 6, sanitize_text_for_pdf(str(modality)), border=0)
 
     pdf.set_font("Helvetica", "B", 9)
     pdf.cell(35, 6, "AI Confidence:", border=0)
@@ -107,7 +146,7 @@ def build_clinical_pdf(
     pdf.cell(40, 4, "PRIMARY IMPRESSION:", border=0)
     pdf.set_font("Helvetica", "B", 9)
     pdf.set_text_color(180, 30, 30)
-    pdf.cell(0, 4, str(primary_finding).upper(), border=0, ln=True)
+    pdf.cell(0, 4, sanitize_text_for_pdf(str(primary_finding).upper()), border=0, ln=True)
     pdf.ln(8)
 
     # Structured Observations Body
@@ -119,14 +158,16 @@ def build_clinical_pdf(
     pdf.ln(3)
 
     pdf.set_font("Helvetica", "", 8.5)
+    pdf.set_text_color(40, 40, 40)
     
-    # Strip markdown syntax for clean PDF rendering
+    # Strip markdown syntax and sanitize all characters for PDF
     clean_report = (
         report_markdown.replace("### ", "\n")
         .replace("## ", "\n")
         .replace("**", "")
         .replace("---", "")
         .replace("📋 ", "")
+        .replace("📖 ", "")
         .replace("🔬 ", "")
         .replace("📊 ", "")
         .replace("⚠️ ", "")
@@ -134,6 +175,7 @@ def build_clinical_pdf(
         .strip()
     )
 
+    clean_report = sanitize_text_for_pdf(clean_report)
     pdf.multi_cell(0, 4.5, clean_report)
 
     return bytes(pdf.output())
