@@ -1,15 +1,22 @@
 import base64
 import io
+import os
 import uuid
-import streamlit as st
 from PIL import Image
+import streamlit as st
 
-# Import the upgraded backend engines
+# -----------------------------------------------------------------------------
+# BRIDGE STREAMLIT SECRETS TO OS ENVIRONMENT
+# -----------------------------------------------------------------------------
+if "GROQ_API_KEY" in st.secrets and not os.environ.get("GROQ_API_KEY"):
+  os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+
+# Lazy-load backends after environment keys are set
 from app.agent.graph_engine import MedicalGraphEngine
 from app.cv.feature_extractor import cv_extractor
 
 # -----------------------------------------------------------------------------
-# PAGE SETUP & CONFIGURATION
+# PAGE SETUP & RESOURCE CACHING
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Multi-Agent Medical Image Analyzer",
@@ -18,7 +25,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Initialize Session State
+
+@st.cache_resource
+def get_graph_engine():
+  return MedicalGraphEngine()
+
+
 if "thread_id" not in st.session_state:
   st.session_state.thread_id = str(uuid.uuid4())[:8]
 
@@ -32,7 +44,7 @@ if "latest_analysis" not in st.session_state:
   st.session_state.latest_analysis = None
 
 if "engine" not in st.session_state:
-  st.session_state.engine = MedicalGraphEngine()
+  st.session_state.engine = get_graph_engine()
 
 
 # -----------------------------------------------------------------------------
@@ -49,12 +61,11 @@ def reset_session():
   st.session_state.messages = []
   st.session_state.scan_count = 0
   st.session_state.latest_analysis = None
-  st.session_state.engine = MedicalGraphEngine()
   st.rerun()
 
 
 # -----------------------------------------------------------------------------
-# UI LAYOUT: TABS & HEADER
+# UI LAYOUT
 # -----------------------------------------------------------------------------
 st.title("🏥 Multi-Agent Medical Image Analyzer")
 
@@ -66,11 +77,11 @@ tab1, tab2 = st.tabs(["🩺 Diagnostics & Chat", "📁 Patient Dossier"])
 with tab1:
   col_left, col_right = st.columns([1, 1], gap="large")
 
-  # --- LEFT COLUMN: SCAN UPLOAD & CV ANALYSIS ---
+  # --- LEFT COLUMN: SCAN UPLOAD & ANALYSIS ---
   with col_left:
     st.subheader("📤 Scan Upload")
     uploaded_file = st.file_uploader(
-        "Upload a medical scan (DICOM/X-ray/MRI/CT)",
+        "Upload a medical scan (X-ray, CT, MRI, Dental)",
         type=["jpg", "jpeg", "png"],
         help="Supports JPG and PNG up to 200MB.",
     )
@@ -120,10 +131,12 @@ with tab1:
           # 4. Save state
           st.session_state.latest_analysis = report
           st.session_state.scan_count += 1
-          st.session_state.messages.append({"role": "assistant", "content": report})
+          st.session_state.messages.append(
+              {"role": "assistant", "content": report}
+          )
           st.rerun()
 
-      # Display BiomedCLIP quick metrics if analysis is complete
+      # Display report accordion
       if st.session_state.latest_analysis:
         st.divider()
         st.success("✅ Analysis Complete")
@@ -139,19 +152,19 @@ with tab1:
           "Upload a scan and run the analysis to begin the clinical discussion."
       )
     else:
-      # Render message history
       chat_container = st.container(height=480)
       with chat_container:
         for msg in st.session_state.messages:
           with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-      # Chat Input Box
-      if user_query := st.chat_input("Ask a follow-up question about this scan..."):
-        # Display user message
-        st.session_state.messages.append({"role": "user", "content": user_query})
+      if user_query := st.chat_input(
+          "Ask a follow-up question about this scan..."
+      ):
+        st.session_state.messages.append(
+            {"role": "user", "content": user_query}
+        )
 
-        # Generate response using memory checkpointer
         with st.spinner("Specialist reviewing context..."):
           response = st.session_state.engine.invoke_with_memory(
               user_message=user_query, thread_id=st.session_state.thread_id
