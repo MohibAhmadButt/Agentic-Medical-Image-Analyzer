@@ -4,11 +4,14 @@ python-multipart
 torch
 torchvision
 Pillow
+open_clip_torch
+huggingface_hub
 langchain-groq
 langchain-core
-python-dotenv
+langchain-community
 langgraph
+pydantic
 streamlit
 transformers
-langchain-community
+python-dotenv
 typing-extensions
