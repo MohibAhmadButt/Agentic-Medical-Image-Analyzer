@@ -1,6 +1,5 @@
 """
-Phase 2: Multi-Resolution Patch Tiling & Hierarchical BiomedCLIP Extractor.
-Slices high-resolution scans into overlapping regional crops to preserve micro-anatomical details.
+Phase 2 & 4: Multi-Resolution Patch Tiling, Hierarchical Ensembles & DICOM Integration.
 """
 
 import io
@@ -10,6 +9,7 @@ from PIL import Image
 import open_clip
 from typing import Union, Dict, Tuple, List
 
+from app.cv.dicom_parser import process_dicom_stream
 
 # ============================================================================
 # TIER 1: ANATOMICAL COMPARTMENTS & PROMPT ENSEMBLES
@@ -52,9 +52,8 @@ ANATOMY_ENSEMBLE = {
     ],
 }
 
-
 # ============================================================================
-# TIER 2: SPECIALIZED PATHOLOGY ENSEMBLES PER COMPARTMENT
+# TIER 2: SPECIALIZED PATHOLOGY ENSEMBLES
 # ============================================================================
 PATHOLOGY_ENSEMBLE = {
     "Pelvis & Hip": {
@@ -171,13 +170,12 @@ PATHOLOGY_ENSEMBLE = {
 
 
 # ============================================================================
-# MULTI-RESOLUTION TILING ENGINE
+# MULTI-RESOLUTION FEATURE EXTRACTOR
 # ============================================================================
 class BiomedFeatureExtractor:
     def __init__(self, device: str = None):
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Load Microsoft BiomedCLIP
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
             "hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
         )
@@ -187,29 +185,43 @@ class BiomedFeatureExtractor:
         self.model.to(self.device)
         self.model.eval()
 
-    def _load_image_stream(self, image_input: Union[str, bytes, Image.Image]) -> Image.Image:
+    def _load_image_stream(
+        self,
+        image_input: Union[str, bytes, Image.Image],
+        window_preset: str = "Auto / Default DICOM"
+    ) -> Tuple[Image.Image, Dict[str, Any]]:
+        """Handles standard image formats and DICOM byte streams."""
         if isinstance(image_input, Image.Image):
-            return image_input.convert("RGB")
+            return image_input.convert("RGB"), {"is_dicom": False}
+
         if isinstance(image_input, bytes):
-            return Image.open(io.BytesIO(image_input)).convert("RGB")
-        return Image.open(image_input).convert("RGB")
+            # Check for DICOM magic header 'DICM' at byte offset 128
+            if len(image_input) > 132 and image_input[128:132] == b"DICM":
+                return process_dicom_stream(image_input, window_preset=window_preset)
+            try:
+                # Try opening as standard JPEG/PNG
+                return Image.open(io.BytesIO(image_input)).convert("RGB"), {"is_dicom": False}
+            except Exception:
+                # Attempt force DICOM parse
+                try:
+                    return process_dicom_stream(image_input, window_preset=window_preset)
+                except Exception:
+                    raise ValueError("Unsupported or corrupted image file format.")
+
+        return Image.open(image_input).convert("RGB"), {"is_dicom": False}
 
     def _generate_patches(self, img: Image.Image) -> List[Tuple[Image.Image, Tuple[int, int, int, int]]]:
-        """Slices high-res image into 5 overlapping spatial crops + the global view."""
         w, h = img.size
-        crops = [
-            # (Cropped Image, (left, upper, right, lower))
-            (img, (0, 0, w, h)),  # Global View
-            (img.crop((0, 0, int(w * 0.6), int(h * 0.6))), (0, 0, int(w * 0.6), int(h * 0.6))),  # Top-Left
-            (img.crop((int(w * 0.4), 0, w, int(h * 0.6))), (int(w * 0.4), 0, w, int(h * 0.6))),  # Top-Right
-            (img.crop((0, int(h * 0.4), int(w * 0.6), h)), (0, int(h * 0.4), int(w * 0.6), h)),  # Bottom-Left
-            (img.crop((int(w * 0.4), int(h * 0.4), w, h)), (int(w * 0.4), int(h * 0.4), w, h)),  # Bottom-Right
-            (img.crop((int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8))), (int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8))),  # Center
+        return [
+            (img, (0, 0, w, h)),  # Global
+            (img.crop((0, 0, int(w * 0.6), int(h * 0.6))), (0, 0, int(w * 0.6), int(h * 0.6))),
+            (img.crop((int(w * 0.4), 0, w, int(h * 0.6))), (int(w * 0.4), 0, w, int(h * 0.6))),
+            (img.crop((0, int(h * 0.4), int(w * 0.6), h)), (0, int(h * 0.4), int(w * 0.6), h)),
+            (img.crop((int(w * 0.4), int(h * 0.4), w, h)), (int(w * 0.4), int(h * 0.4), w, h)),
+            (img.crop((int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8))), (int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8))),
         ]
-        return crops
 
     def _encode_prompt_ensemble(self, prompt_list: List[str]) -> torch.Tensor:
-        """Computes the mean normalized text embedding for clinical prompt variants."""
         tokens = self.tokenizer(prompt_list).to(self.device)
         with torch.no_grad():
             text_embeddings = self.model.encode_text(tokens)
@@ -225,7 +237,6 @@ class BiomedFeatureExtractor:
         crop_box: Tuple[int, int, int, int],
         text_feat: torch.Tensor
     ) -> Image.Image:
-        """Computes saliency on the highest-activation tile and blends it into the full scan."""
         try:
             crop_tensor = self.preprocess(best_crop_img).unsqueeze(0).to(self.device)
             crop_tensor = crop_tensor.clone().detach().requires_grad_(True)
@@ -238,12 +249,10 @@ class BiomedFeatureExtractor:
             self.model.zero_grad()
             score.backward(retain_graph=False)
 
-            gradients = crop_tensor.grad.data.abs().squeeze(0)  # (3, H, W)
+            gradients = crop_tensor.grad.data.abs().squeeze(0)
             saliency = gradients.mean(dim=0).cpu().numpy()
-
             saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min() + 1e-8)
 
-            # Create full-sized saliency map
             orig_w, orig_h = original_img.size
             full_saliency = np.zeros((orig_h, orig_w), dtype=np.float32)
 
@@ -255,12 +264,10 @@ class BiomedFeatureExtractor:
             )
             saliency_patch = np.array(saliency_resized, dtype=np.float32) / 255.0
 
-            # Insert patch into global canvas
             full_saliency[crop_box[1]:crop_box[3], crop_box[0]:crop_box[2]] = np.maximum(
                 full_saliency[crop_box[1]:crop_box[3], crop_box[0]:crop_box[2]], saliency_patch
             )
 
-            # Color map (Jet approximation)
             r = np.clip(1.5 - np.abs(full_saliency * 4 - 3), 0, 1)
             g = np.clip(1.5 - np.abs(full_saliency * 4 - 2), 0, 1)
             b = np.clip(1.5 - np.abs(full_saliency * 4 - 1), 0, 1)
@@ -272,12 +279,18 @@ class BiomedFeatureExtractor:
         except Exception:
             return original_img
 
-    def extract_features(self, image_input: Union[str, bytes, Image.Image]) -> Tuple[Dict, Image.Image]:
-        """Runs multi-resolution patch tiling + hierarchical ensemble scoring."""
-        image = self._load_image_stream(image_input)
+    def extract_features(
+        self,
+        image_input: Union[str, bytes, Image.Image],
+        window_preset: str = "Auto / Default DICOM"
+    ) -> Tuple[Dict, Image.Image, Image.Image]:
+        """
+        Executes multi-resolution patch tiling + hierarchical ensemble scoring.
+        Returns: (telemetry_dict, heatmap_image, standard_rgb_image)
+        """
+        image, dicom_meta = self._load_image_stream(image_input, window_preset=window_preset)
         patches = self._generate_patches(image)
 
-        # Batch encode all 6 crops (Global + 5 Local)
         patch_tensors = torch.cat([
             self.preprocess(p[0]).unsqueeze(0).to(self.device) for p in patches
         ], dim=0)
@@ -286,12 +299,10 @@ class BiomedFeatureExtractor:
             patch_feats = self.model.encode_image(patch_tensors)
             patch_feats = patch_feats / patch_feats.norm(dim=-1, keepdim=True)
 
-        global_feat = patch_feats[0:1]  # Shape (1, Embed)
-        local_feats = patch_feats[1:]   # Shape (5, Embed)
+        global_feat = patch_feats[0:1]
+        local_feats = patch_feats[1:]
 
-        # -------------------------------------------------------------
-        # TIER 1: ANATOMICAL COMPARTMENT TRIAGE (Global Scan Priority)
-        # -------------------------------------------------------------
+        # Tier 1: Anatomical Compartment
         compartment_names = list(ANATOMY_ENSEMBLE.keys())
         compartment_feats = torch.cat([
             self._encode_prompt_ensemble(ANATOMY_ENSEMBLE[comp])
@@ -303,9 +314,7 @@ class BiomedFeatureExtractor:
         selected_compartment = compartment_names[top_comp_idx]
         modality_conf = round(float(mod_probs.max()) * 100, 2)
 
-        # -------------------------------------------------------------
-        # TIER 2: MULTI-RESOLUTION PATHOLOGY SCORING
-        # -------------------------------------------------------------
+        # Tier 2: Multi-Resolution Pathology Scoring
         pathologies_dict = PATHOLOGY_ENSEMBLE.get(selected_compartment, PATHOLOGY_ENSEMBLE["Pelvis & Hip"])
         pathology_names = list(pathologies_dict.keys())
 
@@ -314,15 +323,10 @@ class BiomedFeatureExtractor:
             for p_name in pathology_names
         ], dim=0)
 
-        # Compute similarity matrices
-        # Global Logits: (1, Num_Pathologies)
         global_logits = (100.0 * global_feat @ pathology_feats.T).softmax(dim=-1).cpu().numpy()[0]
-
-        # Local Logits across 5 crops: (5, Num_Pathologies)
         local_logits = (100.0 * local_feats @ pathology_feats.T).softmax(dim=-1).cpu().numpy()
-        max_local_logits = local_logits.max(axis=0)  # Max across tiles
+        max_local_logits = local_logits.max(axis=0)
 
-        # Feature Fusion: 60% Maximum Local Activation + 40% Global Context
         fused_probs = (0.60 * max_local_logits) + (0.40 * global_logits)
         fused_probs = fused_probs / fused_probs.sum()
 
@@ -338,14 +342,12 @@ class BiomedFeatureExtractor:
         top_finding_name = ranked_pathologies[0]["finding"]
         top_idx = pathology_names.index(top_finding_name)
 
-        # Determine which patch had the strongest localized activation
-        best_patch_idx = int(local_logits[:, top_idx].argmax()) + 1  # Offset by 1 for local crops
+        best_patch_idx = int(local_logits[:, top_idx].argmax()) + 1
         best_crop_img, crop_box = patches[best_patch_idx]
 
         top_path_feat = pathology_feats[top_idx : top_idx + 1]
         heatmap_img = self._generate_multi_res_saliency(image, best_crop_img, crop_box, top_path_feat)
 
-        # Standard Modality Mapping for LangGraph protocols
         if "Hip" in selected_compartment or "Skeletal" in selected_compartment or "Spine" in selected_compartment:
             standard_modality = "Bone Radiograph / X-Ray"
         elif "Thorax" in selected_compartment:
@@ -364,9 +366,10 @@ class BiomedFeatureExtractor:
             "primary_finding": ranked_pathologies[0],
             "differential_findings": ranked_pathologies[1:],
             "highest_activation_tile": f"Tile {best_patch_idx} (Box: {crop_box})",
+            "dicom_metadata": dicom_meta,
         }
 
-        return telemetry, heatmap_img
+        return telemetry, heatmap_img, image
 
 
 # Singleton instance
