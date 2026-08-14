@@ -1,3 +1,4 @@
+streamlit
 fastapi
 uvicorn
 python-multipart
@@ -11,7 +12,5 @@ langchain-core
 langchain-community
 langgraph
 pydantic
-streamlit
-transformers
 python-dotenv
 typing-extensions
