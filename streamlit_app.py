@@ -9,6 +9,7 @@ from PIL import Image
 if "GROQ_API_KEY" in st.secrets and not os.environ.get("GROQ_API_KEY"):
     os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 
+# Import Core Engines & Utilities
 from app.agent.graph_engine import MedicalGraphEngine
 from app.cv.feature_extractor import cv_extractor
 from app.utils.pdf_generator import build_clinical_pdf
@@ -29,6 +30,7 @@ def get_engine():
     return MedicalGraphEngine()
 
 
+# Initialize Session State
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())[:8]
 
@@ -79,23 +81,31 @@ with tab_diag:
         st.subheader("📤 Scan Upload & Triage")
         uploaded_file = st.file_uploader(
             "Upload Scan (Pelvis/Hip X-ray, Chest X-ray, Brain CT/MRI)",
-            type=["jpg", "jpeg", "png"]
+            type=["jpg", "jpeg", "png"],
+            help="Processed via Microsoft BiomedCLIP Hierarchical Ensembles and LLaMA 3.3 70B."
         )
 
         modality_override = st.selectbox(
             "Modality Protocol",
-            ["Auto-Detect (BiomedCLIP)", "Bone Radiograph / X-Ray", "Chest X-Ray", "Brain CT / MRI", "Dental Panorex", "Abdominal Scan"]
+            [
+                "Auto-Detect (Hierarchical BiomedCLIP)",
+                "Bone Radiograph / X-Ray",
+                "Chest X-Ray",
+                "Brain CT / MRI",
+                "Dental Panorex",
+                "Abdominal Scan"
+            ]
         )
 
         if uploaded_file is not None:
             raw_img = Image.open(uploaded_file).convert("RGB")
 
             if st.button("🔍 Execute Agentic Analysis", type="primary", use_container_width=True):
-                with st.spinner("Extracting zero-shot BiomedCLIP features & generating attention heatmap..."):
-                    # 1. Feature Extraction & Visual Saliency
+                with st.spinner("Extracting hierarchical BiomedCLIP ensembles & generating visual attention heatmap..."):
+                    # 1. Two-Tier Zero-Shot Feature Extraction & Saliency Overlay
                     telemetry, heatmap_overlay = cv_extractor.extract_features(raw_img)
                     
-                    if modality_override != "Auto-Detect (BiomedCLIP)":
+                    if modality_override != "Auto-Detect (Hierarchical BiomedCLIP)":
                         telemetry["standard_modality"] = modality_override
 
                     st.session_state.cv_telemetry = telemetry
@@ -108,28 +118,35 @@ with tab_diag:
                         extra_meta={"telemetry": telemetry}
                     )
 
+                    # 3. Update State
                     st.session_state.current_report = report
                     st.session_state.scan_count += 1
                     st.session_state.messages.append({"role": "assistant", "content": report})
                     st.rerun()
 
-            # Side-by-Side Visual Inspection (Original vs Heatmap)
+            # Dual-Panel Visual Comparison: Original Scan vs AI Attention Heatmap
             if st.session_state.heatmap_image is not None:
                 img_col1, img_col2 = st.columns(2)
                 with img_col1:
-                    st.image(raw_img, caption="Original Scan", use_container_width=True)
+                    st.image(raw_img, caption="Original Medical Scan", use_container_width=True)
                 with img_col2:
-                    st.image(st.session_state.heatmap_image, caption="AI Attention Heatmap Overlay", use_container_width=True)
+                    st.image(st.session_state.heatmap_image, caption="AI Attention Saliency Overlay", use_container_width=True)
             else:
                 st.image(raw_img, caption="Active Patient Scan", use_container_width=True)
 
-            # Diagnostic Report Display
+            # Diagnostic Consultation Findings & PDF Download
             if st.session_state.current_report and st.session_state.cv_telemetry:
                 st.divider()
                 st.success("✅ Diagnostic Consultation Ready")
                 
                 top_f = st.session_state.cv_telemetry["primary_finding"]
-                st.caption(f"🔬 **Vision Detection:** `{top_f['finding']}` ({top_f['confidence']}% confidence)")
+                comp = st.session_state.cv_telemetry.get("anatomical_compartment", "Bone")
+                
+                # Phase 1 Subtitle Displaying Hierarchical Triage
+                st.caption(
+                    f"🔬 **Tier-1 Triage:** `{comp}` ({st.session_state.cv_telemetry['modality_confidence']}% confidence) "
+                    f"| **Tier-2 Finding:** `{top_f['finding']}` ({top_f['confidence']}%)"
+                )
 
                 with st.expander("📄 View Official Specialist Report", expanded=True):
                     st.markdown(st.session_state.current_report)
