@@ -1,14 +1,12 @@
-"""LangGraph Multi-Agent Triage Engine with Memory & BiomedCLIP Integration.
+"""LangGraph Multi-Agent Triage Engine with Memory & Active Vision Models.
 
 Routes images from a Triage Agent to a Specialist Agent using Dynamic
 Chain-of-Sight.
 Includes Payload Cleaning and Reducers to prevent State Amnesia.
 """
 
-import json
 import os
 from typing import Annotated, Any, Dict, List, Literal
-from app.cv.feature_extractor import cv_extractor
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
@@ -133,7 +131,7 @@ MODALITY_INSTRUCTIONS = {
 
 
 # ============================================================================
-# STRUCTURED SCHEMAS FOR RELIABLE PARSING
+# STRUCTURED SCHEMAS
 # ============================================================================
 class TriageClassification(BaseModel):
   modality: Literal[
@@ -150,16 +148,13 @@ class TriageClassification(BaseModel):
       "DEXA Scan",
       "Unknown",
   ] = Field(description="Exact imaging modality detected.")
-  visual_confidence: float = Field(
-      description="Confidence in classification from 0 to 100."
-  )
 
 
 # ============================================================================
 # STATE REDUCERS & DEFINITION
 # ============================================================================
 def update_metadata(existing: dict, new: dict) -> dict:
-  """Safely merges metadata so follow-up questions don't wipe the memory."""
+  """Safely merges metadata so follow-up questions don't wipe the session memory."""
   if existing is None:
     return new if new is not None else {}
   if new is None:
@@ -179,17 +174,17 @@ class MedicalAgentState(TypedDict):
 # ============================================================================
 class MedicalGraphEngine:
 
-  def __init__(self):
-    groq_key = os.environ.get("GROQ_API_KEY")
+  def __init__(self, api_key: str = None):
+    groq_key = api_key or os.environ.get("GROQ_API_KEY")
 
-    # Vision LLM for multi-modal reasoning
+    # Production Vision Model on Groq
     self.vision_llm = ChatGroq(
         api_key=groq_key,
-        model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+        model_name="llama-3.2-11b-vision-preview",
         temperature=0.0,
     )
 
-    # Text LLM for Q&A and Conversational Follow-up
+    # Clinical Reasoning & Follow-up Q&A LLM
     self.text_llm = ChatGroq(
         api_key=groq_key,
         model_name="llama-3.3-70b-versatile",
@@ -214,7 +209,6 @@ class MedicalGraphEngine:
     return workflow.compile(checkpointer=self.memory)
 
   def _router(self, state: MedicalAgentState) -> str:
-    """Routes to QA node if an analysis is already active for this session thread."""
     if state.get("clinical_metadata", {}).get("analysis_complete", False):
       return "qa_node"
     return "triage_node"
@@ -238,7 +232,6 @@ class MedicalGraphEngine:
       ])
       modality = structured_result.modality
     except Exception:
-      # Robust fallback if structured parsing encounters API anomalies
       modality = "Unknown"
 
     return {"clinical_metadata": {"modality": modality}}
@@ -249,13 +242,12 @@ class MedicalGraphEngine:
         modality, MODALITY_INSTRUCTIONS["Unknown"]
     )
 
-    # Optional: Extract BiomedCLIP insights if image data/path is accessible
-    biomed_context = state.get("clinical_metadata", {}).get(
+    biomed_findings = state.get("clinical_metadata", {}).get(
         "biomed_findings", ""
     )
-    biomed_prompt_insert = (
-        f"\nBiomedCLIP Grounded Features: {biomed_context}\n"
-        if biomed_context
+    biomed_context = (
+        f"\nBiomedCLIP Grounded Features: {biomed_findings}\n"
+        if biomed_findings
         else ""
     )
 
@@ -267,12 +259,12 @@ class MedicalGraphEngine:
         f" method:\n"
         f"1. Technique: {instructions['technique']}\n"
         f"2. Check specifically for: {instructions['checklist']}\n"
-        f"{biomed_prompt_insert}\n"
-        f"Provide a structured clinical report detailing:\n"
+        f"{biomed_context}\n"
+        f"Provide a clear, structured clinical report detailing:\n"
         f"- Modality & Visual Technique\n"
         f"- Primary Observations & Lesion Localization\n"
         f"- Differential Diagnoses\n"
-        f"- Urgency (Routine / Expedited / Emergency)\n\n"
+        f"- Urgency (Routine / Expedited / Immediate Emergency)\n\n"
         f"ALWAYS remind the user that this is an AI clinical-decision support"
         f" tool and NOT a substitute for professional medical advice."
     )
@@ -309,7 +301,7 @@ class MedicalGraphEngine:
 
     system_prompt = (
         f"You are a clinical advisory chatbot having a conversation with a"
-        f" patient/doctor.\n"
+        f" patient or physician.\n"
         f"Here is the official radiologist report that was already"
         f" generated:\n"
         f"----------------------\n{history}\n----------------------\n\n"
@@ -320,7 +312,7 @@ class MedicalGraphEngine:
         f" above.\n"
         f"3. Speak naturally and conversationally. If asked for next steps,"
         f" suggest logical clinical follow-ups based purely on the report.\n"
-        f"4. If the user asks for a specific format (e.g. 'in one word', 'bullet"
+        f"4. If the user asks for a specific format (e.g., 'in one word', 'bullet"
         f" points'), obey that constraint strictly."
     )
 
