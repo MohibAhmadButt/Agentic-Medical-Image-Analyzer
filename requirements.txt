@@ -6,6 +6,7 @@ torch
 torchvision
 Pillow
 open_clip_torch
+transformers
 huggingface_hub
 langchain-groq
 langchain-core
