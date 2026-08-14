@@ -1,10 +1,10 @@
 """
-LangGraph Multi-Agent Triage Engine with Memory & Active Vision Models.
-Routes images from a Triage Agent to a Specialist Agent using Dynamic Chain-of-Sight.
+LangGraph Multi-Agent Clinical Triage Engine with Stateful Memory.
+Routes telemetry through structured specialist nodes and maintains conversation state.
 """
 
 import os
-from typing import Annotated, Literal, Dict, Any, List
+from typing import Annotated, Dict, Any, List, Literal
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
@@ -16,217 +16,172 @@ from typing_extensions import TypedDict
 load_dotenv()
 
 # ============================================================================
-# SPECIALIST KNOWLEDGE BASE & RADIOLOGICAL TECHNIQUES
+# CLINICAL RADIOLOGY GUIDELINES
 # ============================================================================
-MODALITY_INSTRUCTIONS = {
-    "Bone X-Ray": {
-        "technique": "Trace the cortical outlines of every visible bone from end to end. Look specifically for discontinuities, sharp steps, angulations, or displaced fragments.",
-        "checklist": "Fractures, Osteoporosis signs, Bone tumors, Arthritis (joint space narrowing), and Osteomyelitis."
-    },
+MODALITY_PROTOCOLS = {
     "Chest X-Ray": {
-        "technique": "Use the ABCDE approach: Airway (trachea midline), Breathing (lung fields clear, inspect pleural margins for air/fluid), Circulation (heart size and borders), Disability (rib fractures), Everything else (diaphragm contours).",
-        "checklist": "Pneumonia, Tuberculosis, Lung cancer, COVID-19 pneumonia, Pleural effusion, Pneumothorax, COPD, Cardiomegaly, and Pulmonary edema."
+        "focus": "Inspect lung fields for opacities, cardiomegaly, pleural effusions, and pneumothorax.",
+        "checklist": "Pneumonia, Effusion, Infiltrates, Cardiomegaly, Fractures."
     },
-    "Brain CT": {
-        "technique": "Evaluate for symmetry. Check for hyperdense areas (acute bleeding), hypodense areas (ischemia/edema), midline shift, mass effect, and ventricular effacement.",
-        "checklist": "Stroke signs, Brain bleed (hemorrhage), Tumors, Trauma/skull fractures, and Hydrocephalus."
+    "Bone Radiograph / X-Ray": {
+        "focus": "Trace cortical margins for discontinuities, dislocations, and bone density variations.",
+        "checklist": "Cortical disruption, Joint space narrowing, Dislocation, Osteolysis."
     },
-    "Abdominal X-Ray": {
-        "technique": "Assess bowel gas patterns (look for dilated loops or air-fluid levels), solid organ outlines, and look for abnormal calcifications or free air under the diaphragm.",
-        "checklist": "Bowel obstruction, Kidney stones, Perforation (pneumoperitoneum), and Constipation."
+    "Brain CT / MRI": {
+        "focus": "Evaluate midline shift, symmetry, hyperdense acute hemorrhage, or hypodense ischemic infarcts.",
+        "checklist": "Mass effect, Ischemic stroke, Subdural/Epidural bleed, Edema."
     },
-    "Dental X-Ray": {
-        "technique": "Examine the enamel cap, dentin, and pulp chamber of each tooth. Assess the alveolar bone levels and the periodontal ligament space.",
-        "checklist": "Cavities (radiolucencies), Impacted teeth, Jaw infection/abscesses, and Bone loss."
+    "Dental Panorex": {
+        "focus": "Examine enamel integrity, alveolar bone levels, and apical radiolucencies.",
+        "checklist": "Periapical lesion, Deep caries, Impaction, Periodontal bone loss."
     },
-    "Chest CT": {
-        "technique": "Evaluate lung parenchyma using lung windows, check mediastinal structures using soft tissue windows, and assess for pulmonary emboli or masses.",
-        "checklist": "Lung nodules, Cancer, Fibrosis, Pulmonary embolism, and Severe infection."
-    },
-    "Abdominal CT": {
-        "technique": "Perform a systematic review of solid organs (liver, spleen, kidneys, pancreas), hollow viscus, vessels, and look for free fluid or lymphadenopathy.",
-        "checklist": "Liver disease, Pancreatitis, Kidney stones, Appendicitis, and Tumors."
-    },
-    "Spine CT": {
-        "technique": "Evaluate vertebral body alignment, disk spaces, facet joints, and the spinal canal for narrowing or impingement.",
-        "checklist": "Disc disease, Spinal fractures, and Compression."
-    },
-    "Mammography": {
-        "technique": "Compare bilateral symmetry. Search for spiculated masses, architectural distortion, and clusters of microcalcifications.",
-        "checklist": "Breast cancer, Calcifications, Cysts, and Dense tissue abnormalities."
-    },
-    "Unknown": {
-        "technique": "Perform a systematic visual sweep of the entire image from outside to inside, noting any asymmetries, abnormal densities, or structural disruptions.",
-        "checklist": "Any visible anatomical abnormalities or signs of trauma."
+    "Abdominal Scan": {
+        "focus": "Assess bowel gas distribution, free peritoneal air, and organ borders.",
+        "checklist": "Obstruction, Free fluid, Calcifications, Perforation."
     }
 }
 
 # ============================================================================
-# STATE REDUCERS & DEFINITION
+# STATE DEFINITION & PERSISTENCE REDUCER
 # ============================================================================
-def update_metadata(existing: dict, new: dict) -> dict:
-    """Safely merges metadata so follow-up questions don't wipe session memory."""
-    if existing is None:
-        return new if new is not None else {}
-    if new is None:
-        return existing
-    res = existing.copy()
-    res.update(new)
-    return res
+def merge_metadata(current: dict, update: dict) -> dict:
+    if current is None:
+        return update if update is not None else {}
+    if update is None:
+        return current
+    merged = current.copy()
+    merged.update(update)
+    return merged
 
-class MedicalAgentState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-    clinical_metadata: Annotated[dict, update_metadata]
+class ClinicalAgentState(TypedDict):
+    messages: Annotated[List[BaseMessage], add_messages]
+    session_metadata: Annotated[dict, merge_metadata]
 
 # ============================================================================
-# MULTI-AGENT GRAPH ENGINE
+# ENGINE PIPELINE
 # ============================================================================
 class MedicalGraphEngine:
-    
     def __init__(self, api_key: str = None):
-        groq_key = api_key or os.environ.get("GROQ_API_KEY")
+        groq_api_key = api_key or os.environ.get("GROQ_API_KEY")
         
-        # Multimodal Vision Model on Groq
-        self.vision_llm = ChatGroq(
-            api_key=groq_key,
-            model_name="llama-3.2-11b-vision-preview",
-            temperature=0.0
-        )
-        
-        # Clinical Reasoning & Follow-up Q&A LLM
-        self.text_llm = ChatGroq(
-            api_key=groq_key,
+        # High-performance LLaMA 3.3 70B reasoning engine
+        self.llm = ChatGroq(
+            api_key=groq_api_key,
             model_name="llama-3.3-70b-versatile",
-            temperature=0.2
+            temperature=0.1
         )
-        
         self.memory = MemorySaver()
         self.graph = self._build_graph()
-        
+
     def _build_graph(self):
-        workflow = StateGraph(MedicalAgentState)
-        
-        workflow.add_node("triage_node", self._triage_node)
-        workflow.add_node("specialist_node", self._specialist_node)
-        workflow.add_node("qa_node", self._qa_node)
-        
-        workflow.add_conditional_edges(START, self._router)
-        workflow.add_edge("triage_node", "specialist_node")
-        workflow.add_edge("specialist_node", "qa_node")
-        workflow.add_edge("qa_node", END)
-        
-        return workflow.compile(checkpointer=self.memory)
-    
-    def _router(self, state: MedicalAgentState) -> str:
-        if state.get("clinical_metadata", {}).get("analysis_complete", False):
+        builder = StateGraph(ClinicalAgentState)
+
+        builder.add_node("triage_node", self._triage_node)
+        builder.add_node("specialist_node", self._specialist_node)
+        builder.add_node("qa_node", self._qa_node)
+
+        builder.add_conditional_edges(START, self._router)
+        builder.add_edge("triage_node", "specialist_node")
+        builder.add_edge("specialist_node", "qa_node")
+        builder.add_edge("qa_node", END)
+
+        return builder.compile(checkpointer=self.memory)
+
+    def _router(self, state: ClinicalAgentState) -> str:
+        if state.get("session_metadata", {}).get("report_generated", False):
             return "qa_node"
         return "triage_node"
 
-    def _triage_node(self, state: MedicalAgentState) -> dict:
-        # Prioritize detected modality from BiomedCLIP metadata
-        detected = state.get("clinical_metadata", {}).get("detected_modality", "").title()
+    def _triage_node(self, state: ClinicalAgentState) -> dict:
+        input_modality = state.get("session_metadata", {}).get("modality_hint", "Chest X-Ray")
         
-        matched_modality = "Unknown"
-        for key in MODALITY_INSTRUCTIONS.keys():
-            if key.lower() in detected.lower() or detected.lower() in key.lower():
-                matched_modality = key
+        # Match against designated protocols
+        selected_modality = "Chest X-Ray"
+        for key in MODALITY_PROTOCOLS:
+            if key.lower() in input_modality.lower() or input_modality.lower() in key.lower():
+                selected_modality = key
                 break
-                
-        return {"clinical_metadata": {"modality": matched_modality}}
 
-    def _specialist_node(self, state: MedicalAgentState) -> dict:
-        modality = state.get("clinical_metadata", {}).get("modality", "Unknown")
-        instructions = MODALITY_INSTRUCTIONS.get(modality, MODALITY_INSTRUCTIONS["Unknown"])
-        
-        biomed_findings = state.get("clinical_metadata", {}).get("biomed_findings", "")
-        biomed_context = f"\nBiomedCLIP Grounded Features: {biomed_findings}\n" if biomed_findings else ""
-        
+        return {"session_metadata": {"active_modality": selected_modality}}
+
+    def _specialist_node(self, state: ClinicalAgentState) -> dict:
+        modality = state.get("session_metadata", {}).get("active_modality", "Chest X-Ray")
+        protocol = MODALITY_PROTOCOLS.get(modality, MODALITY_PROTOCOLS["Chest X-Ray"])
+        visual_findings = state.get("session_metadata", {}).get("findings_summary", "Standard density screening.")
+
         system_instruction = (
-            f"You are a highly vigilant, expert radiologist specializing in {modality}.\n"
-            f"CRITICAL INSTRUCTION: Do NOT assume this image is normal. You must actively search for pathology using this specific radiological method:\n"
-            f"1. Technique: {instructions['technique']}\n"
-            f"2. Check specifically for: {instructions['checklist']}\n"
-            f"{biomed_context}\n"
-            f"Provide a clear, structured clinical report detailing:\n"
-            f"- Modality & Visual Technique\n"
-            f"- Primary Observations & Lesion Localization\n"
-            f"- Differential Diagnoses\n"
-            f"- Urgency (Routine / Expedited / Immediate Emergency)\n\n"
-            f"ALWAYS remind the user that this is an AI clinical-decision support tool and NOT a substitute for professional medical advice."
-        )
-        
-        # Find multimodal payload message
-        image_message = next(
-            (msg for msg in state["messages"] if isinstance(getattr(msg, "content", None), list)),
-            state["messages"][0]
+            f"You are a Senior Radiologist and Clinical Decision Support AI specializing in {modality}.\n"
+            f"CLINICAL PROTOCOL:\n"
+            f"- Primary Focus: {protocol['focus']}\n"
+            f"- Diagnostic Checklist: {protocol['checklist']}\n"
+            f"- Scan Biomarker Observations: {visual_findings}\n\n"
+            f"Generate a rigorous structured report with the following markdown format:\n"
+            f"### 📋 Primary Diagnostic Impression\n"
+            f"[Direct diagnostic impression detailing likely pathology or clear status]\n\n"
+            f"### 🔬 Detailed Observations & Localization\n"
+            f"[Systematic breakdown of anatomical structures and visual densities]\n\n"
+            f"### 📊 Differential Diagnoses\n"
+            f"- Primary Suspect (with clinical justification)\n"
+            f"- Secondary Differential\n\n"
+            f"### ⚠️ Urgency Level\n"
+            f"**[Routine | Expedited | Immediate Emergency]**\n\n"
+            f"### 💡 Recommended Next Steps\n"
+            f"[Actionable clinical steps, confirmatory imaging, or lab tests]\n\n"
+            f"---\n*Disclaimer: AI decision-support utility. All findings require clinical confirmation.*"
         )
 
-        # Merge instruction into the multimodal prompt
-        prompt_content = [{"type": "text", "text": system_instruction}]
-        if isinstance(image_message.content, list):
-            for item in image_message.content:
-                if isinstance(item, dict) and item.get("type") == "image_url":
-                    prompt_content.append(item)
-        
-        response = self.vision_llm.invoke([HumanMessage(content=prompt_content)])
-        
+        response = self.llm.invoke([
+            SystemMessage(content=system_instruction),
+            HumanMessage(content=f"Synthesize the complete radiological consultation report for this {modality} scan.")
+        ])
+
         return {
             "messages": [response],
-            "clinical_metadata": {
-                "diagnostic_summary": response.content,
-                "analysis_complete": True
+            "session_metadata": {
+                "report_content": response.content,
+                "report_generated": True
             }
         }
 
-    def _qa_node(self, state: MedicalAgentState) -> dict:
+    def _qa_node(self, state: ClinicalAgentState) -> dict:
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage):
             return {}
 
-        history = state.get("clinical_metadata", {}).get("diagnostic_summary", "No prior analysis found.")
-        
+        report = state.get("session_metadata", {}).get("report_content", "No prior report found.")
+        modality = state.get("session_metadata", {}).get("active_modality", "Medical Scan")
+
         system_prompt = (
-            f"You are a clinical advisory chatbot having a conversation with a patient or physician.\n"
-            f"Here is the official radiologist report that was already generated:\n"
-            f"----------------------\n{history}\n----------------------\n\n"
-            f"CRITICAL INSTRUCTIONS:\n"
-            f"1. You are in CHAT MODE. DO NOT generate a new radiologist report. DO NOT output 'Findings' or 'Image Description'.\n"
-            f"2. Answer user questions based strictly on the report context above.\n"
-            f"3. Speak naturally and conversationally. If asked for next steps, suggest logical clinical follow-ups based purely on the report.\n"
-            f"4. If the user asks for a specific format (e.g., 'in one word', 'bullet points'), obey that constraint strictly."
+            f"You are a clinical advisory specialist discussing a previously analyzed {modality} scan.\n"
+            f"REPORT IN CONTEXT:\n----------------\n{report}\n----------------\n\n"
+            f"INSTRUCTIONS:\n"
+            f"1. You are in interactive chat mode. Do not generate a new report template.\n"
+            f"2. Answer user questions directly, empathetically, and accurately based on the report findings.\n"
+            f"3. Strictly obey user formatting constraints (e.g. short summary, single sentence, bullet points)."
         )
-        
-        clean_messages = []
+
+        clean_history = []
         for msg in state["messages"]:
             if isinstance(msg, AIMessage):
-                clean_messages.append(msg)
+                clean_history.append(msg)
             elif isinstance(msg, HumanMessage):
-                if isinstance(msg.content, list):
-                    text_only = next(
-                        (item["text"] for item in msg.content if isinstance(item, dict) and item.get("type") == "text"),
-                        "[User uploaded an image]"
-                    )
-                    clean_messages.append(HumanMessage(content=text_only))
-                else:
-                    clean_messages.append(msg)
-        
-        response = self.text_llm.invoke([
+                text = msg.content if isinstance(msg.content, str) else str(msg.content)
+                clean_history.append(HumanMessage(content=text))
+
+        response = self.llm.invoke([
             SystemMessage(content=system_prompt),
-            *clean_messages
+            *clean_history
         ])
-        
+
         return {"messages": [response]}
 
-    def invoke_with_memory(self, user_message: Any, thread_id: str, extra_metadata: dict = None) -> str:
-        """Main entry point called by Streamlit."""
-        input_state = {
-            "messages": [HumanMessage(content=user_message if isinstance(user_message, list) else str(user_message))]
-        }
-        if extra_metadata:
-            input_state["clinical_metadata"] = extra_metadata
+    def invoke_with_memory(self, user_query: str, thread_id: str, extra_meta: dict = None) -> str:
+        input_state = {"messages": [HumanMessage(content=str(user_query))]}
+        if extra_meta:
+            input_state["session_metadata"] = extra_meta
 
         config = {"configurable": {"thread_id": thread_id}}
         result = self.graph.invoke(input_state, config=config)
-        
-        final_message = result["messages"][-1]
-        return final_message.content if hasattr(final_message, "content") else "Analysis complete."
+
+        final_msg = result["messages"][-1]
+        return final_msg.content if hasattr(final_msg, "content") else "Consultation completed."
