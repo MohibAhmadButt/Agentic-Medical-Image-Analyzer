@@ -1,7 +1,6 @@
 """
 LangGraph Multi-Agent Triage Engine with Memory & Active Vision Models.
 Routes images from a Triage Agent to a Specialist Agent using Dynamic Chain-of-Sight.
-Includes Payload Cleaning and Reducers to prevent State Amnesia.
 """
 
 import os
@@ -13,7 +12,6 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
-from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -64,20 +62,10 @@ MODALITY_INSTRUCTIONS = {
 }
 
 # ============================================================================
-# STRUCTURED SCHEMAS
-# ============================================================================
-class TriageClassification(BaseModel):
-    modality: Literal[
-        "Chest X-Ray", "Bone X-Ray", "Abdominal X-Ray", "Dental X-Ray",
-        "Brain CT", "Chest CT", "Abdominal CT", "Spine CT",
-        "Mammography", "Angiography", "DEXA Scan", "Unknown"
-    ] = Field(description="Exact imaging modality detected.")
-
-# ============================================================================
 # STATE REDUCERS & DEFINITION
 # ============================================================================
 def update_metadata(existing: dict, new: dict) -> dict:
-    """Safely merges metadata so follow-up questions don't wipe the session memory."""
+    """Safely merges metadata so follow-up questions don't wipe session memory."""
     if existing is None:
         return new if new is not None else {}
     if new is None:
@@ -135,24 +123,16 @@ class MedicalGraphEngine:
         return "triage_node"
 
     def _triage_node(self, state: MedicalAgentState) -> dict:
-        triage_structured_llm = self.vision_llm.with_structured_output(TriageClassification)
+        # Prioritize detected modality from BiomedCLIP metadata
+        detected = state.get("clinical_metadata", {}).get("detected_modality", "").title()
         
-        system_prompt = (
-            "You are an expert medical triage AI. Analyze the uploaded image and "
-            "categorize it strictly into one of the designated medical imaging modalities."
-        )
-        
-        last_message = state["messages"][-1]
-        try:
-            structured_result: TriageClassification = triage_structured_llm.invoke([
-                SystemMessage(content=system_prompt),
-                last_message
-            ])
-            modality = structured_result.modality
-        except Exception:
-            modality = "Unknown"
-            
-        return {"clinical_metadata": {"modality": modality}}
+        matched_modality = "Unknown"
+        for key in MODALITY_INSTRUCTIONS.keys():
+            if key.lower() in detected.lower() or detected.lower() in key.lower():
+                matched_modality = key
+                break
+                
+        return {"clinical_metadata": {"modality": matched_modality}}
 
     def _specialist_node(self, state: MedicalAgentState) -> dict:
         modality = state.get("clinical_metadata", {}).get("modality", "Unknown")
@@ -161,7 +141,7 @@ class MedicalGraphEngine:
         biomed_findings = state.get("clinical_metadata", {}).get("biomed_findings", "")
         biomed_context = f"\nBiomedCLIP Grounded Features: {biomed_findings}\n" if biomed_findings else ""
         
-        system_prompt = (
+        system_instruction = (
             f"You are a highly vigilant, expert radiologist specializing in {modality}.\n"
             f"CRITICAL INSTRUCTION: Do NOT assume this image is normal. You must actively search for pathology using this specific radiological method:\n"
             f"1. Technique: {instructions['technique']}\n"
@@ -175,19 +155,20 @@ class MedicalGraphEngine:
             f"ALWAYS remind the user that this is an AI clinical-decision support tool and NOT a substitute for professional medical advice."
         )
         
-        # Extract the image message safely
+        # Find multimodal payload message
         image_message = next(
             (msg for msg in state["messages"] if isinstance(getattr(msg, "content", None), list)),
             state["messages"][0]
         )
 
-        if not isinstance(image_message, HumanMessage):
-            image_message = HumanMessage(content=getattr(image_message, "content", str(image_message)))
+        # Merge instruction into the multimodal prompt
+        prompt_content = [{"type": "text", "text": system_instruction}]
+        if isinstance(image_message.content, list):
+            for item in image_message.content:
+                if isinstance(item, dict) and item.get("type") == "image_url":
+                    prompt_content.append(item)
         
-        response = self.vision_llm.invoke([
-            SystemMessage(content=system_prompt),
-            image_message
-        ])
+        response = self.vision_llm.invoke([HumanMessage(content=prompt_content)])
         
         return {
             "messages": [response],
